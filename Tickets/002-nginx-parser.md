@@ -1,6 +1,7 @@
 # 002 — Normalized request event and Nginx parser
 
-**Status:** To do  
+**Status:** Done
+
 **Milestone:** V1  
 **Depends on:** 001  
 **Brief:** §§9–10, 49, 65

@@ -1,6 +1,7 @@
 # 013 — Explainable scoring and monitor decisions
 
-**Status:** To do  
+**Status:** Done
+
 **Milestone:** V1  
 **Depends on:** 009, 010, 011, 012  
 **Brief:** §§32–36, 39, 58–59

@@ -1,6 +1,7 @@
 # 009 — URL patterns and 404 enumeration
 
-**Status:** To do  
+**Status:** Done
+
 **Milestone:** V1  
 **Depends on:** 006  
 **Brief:** §§14–16, 33, 53

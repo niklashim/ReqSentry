@@ -1,6 +1,7 @@
 # 008 — PHP-FPM health collection
 
-**Status:** To do  
+**Status:** Done
+
 **Milestone:** V1  
 **Depends on:** 001  
 **Brief:** §§4, 30–31, 47, 67

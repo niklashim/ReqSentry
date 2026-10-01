@@ -1,6 +1,7 @@
 # 003 — Apache parser and log-format guidance
 
-**Status:** To do  
+**Status:** Done
+
 **Milestone:** V1  
 **Depends on:** 002  
 **Brief:** §§4, 9–10, 65, 67

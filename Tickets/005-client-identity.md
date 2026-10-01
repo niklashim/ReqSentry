@@ -1,6 +1,7 @@
 # 005 — Client IP, trusted proxies, and allowlists
 
-**Status:** To do  
+**Status:** Done
+
 **Milestone:** V1  
 **Depends on:** 002  
 **Brief:** §§48–50, 67–68

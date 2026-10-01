@@ -1,6 +1,7 @@
 # 006 — Bounded rolling aggregation
 
-**Status:** To do  
+**Status:** Done
+
 **Milestone:** V1  
 **Depends on:** 002, 005  
 **Brief:** §§5, 8, 11–13, 40, 53, 63

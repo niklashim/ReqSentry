@@ -1,6 +1,7 @@
 # 012 — Cross-site and server-impact signals
 
-**Status:** To do  
+**Status:** Done
+
 **Milestone:** V1  
 **Depends on:** 006, 007, 008  
 **Brief:** §§5, 9, 30–31, 33

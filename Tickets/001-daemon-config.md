@@ -1,6 +1,7 @@
 # 001 — Go daemon skeleton and configuration
 
-**Status:** To do  
+**Status:** Done
+
 **Milestone:** V1  
 **Depends on:** None  
 **Brief:** §§1–8, 62–65

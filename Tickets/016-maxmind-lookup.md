@@ -1,6 +1,7 @@
 # 016 — Local MaxMind enrichment
 
-**Status:** To do  
+**Status:** Done
+
 **Milestone:** V1  
 **Depends on:** 001, 005  
 **Brief:** §§22–23, 49, 67

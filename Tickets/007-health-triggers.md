@@ -1,6 +1,7 @@
 # 007 — Server health and analysis triggers
 
-**Status:** To do  
+**Status:** Done
+
 **Milestone:** V1  
 **Depends on:** 001, 006  
 **Brief:** §§7–8, 29, 67

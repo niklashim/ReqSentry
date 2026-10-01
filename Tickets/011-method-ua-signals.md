@@ -1,6 +1,7 @@
 # 011 — HTTP methods and User-Agent signals
 
-**Status:** To do  
+**Status:** Done
+
 **Milestone:** V1  
 **Depends on:** 006  
 **Brief:** §§18–21, 33, 51
