@@ -16,4 +16,4 @@ Follow every configured Nginx and Apache access file through a single daemon, pr
 - Rotation and restart behavior is tested with fixtures that detect skipped or duplicate events at the handoff boundary.
 - Persistent failures are observable through operational logs/health state for later alerts.
 
-Implementation and restart limits are documented in [local history and output](../docs/storage-output.md).
+Implementation and restart limits are documented in [local history and output](../../docs/storage-output.md).

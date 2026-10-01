@@ -1,0 +1,15 @@
+.env
+__pycache__/
+*.pyc
+
+# Runtime state from the local Docker environment. Keep directory placeholders.
+/dev-data/**
+!/dev-data/**/
+!/dev-data/.gitignore
+!/dev-data/**/.gitkeep
+
+# Local configuration overrides and generated binaries.
+/configs/*.private.yaml
+/configs/*.override.yaml
+/coverage.out
+/reqsentry

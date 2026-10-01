@@ -88,3 +88,24 @@ output:
     # To enable Slack, use exactly one of:
     # webhook_env: REQSENTRY_SLACK_WEBHOOK
     # webhook_credential: slack-webhook
+
+# Optional read-only dashboard. Disabled until explicitly enabled.
+# For SSH tunneling, keep loopback listen and allowlist; do not add loopback to
+# trusted_proxies unless a local reverse proxy always supplies X-Forwarded-For.
+web:
+  enabled: false
+  listen: 127.0.0.1
+  port: 8090
+  allowed_ips:
+    - 127.0.0.1
+    - ::1
+  trusted_proxies: []
+  auth:
+    enabled: false
+    # username: admin
+    # password_env: REQSENTRY_WEB_PASSWORD
+    # Or password_credential: dashboard-password
+  realtime:
+    enabled: true
+    interval: 2s
+    max_clients: 32

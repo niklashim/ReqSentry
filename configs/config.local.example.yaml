@@ -1,0 +1,73 @@
+# Development-only config copied into the combined Nginx + ReqSentry image.
+server:
+  name: reqsentry-local
+mode: monitor
+
+access_files:
+  - path: /var/log/nginx/site1.access.log
+    site: him.com
+    type: nginx
+  - path: /var/log/nginx/site2.access.log
+    site: mycoolshop.se
+    type: nginx
+  - path: /var/log/nginx/site3.access.log
+    site: ekstrom.nu
+    type: nginx
+  - path: /var/log/nginx/site4.access.log
+    site: wordpress-site.com
+    type: nginx
+
+client_ip:
+  header: x-forwarded-for
+  trusted_proxies: []
+allowlist: []
+
+trigger:
+  mode: always
+analysis:
+  window: 30s
+
+database:
+  path: /var/lib/reqsentry/reqsentry.db
+
+maxmind:
+  enabled: false
+  edition: GeoIP2-Enterprise
+  database_dir: /var/lib/reqsentry/maxmind
+  update:
+    enabled: false
+    interval: 24h
+  # To enable updates, set account_id and license_key_env below.
+  # account_id: YOUR_ACCOUNT_ID
+  # license_key_env: REQSENTRY_MAXMIND_LICENSE_KEY
+
+output:
+  log:
+    enabled: true
+    path: /var/log/reqsentry/reqsentry.log
+  incidents:
+    enabled: true
+    path: /var/log/reqsentry/incidents.jsonl
+  slack:
+    enabled: false
+    # webhook_env: REQSENTRY_SLACK_WEBHOOK
+
+# DEVELOPMENT ONLY: Docker bridge sources must pass the IP allowlist.
+# Host publishing remains bound to 127.0.0.1 by docker-compose.yml.
+# Keep production configs on a specific, minimal allowlist.
+web:
+  enabled: true
+  listen: 0.0.0.0
+  port: 8090
+  allowed_ips:
+    - 127.0.0.1
+    - ::1
+    - 172.16.0.0/12
+    - 192.168.65.0/24
+  trusted_proxies: []
+  auth:
+    enabled: false
+  realtime:
+    enabled: true
+    interval: 2s
+    max_clients: 16

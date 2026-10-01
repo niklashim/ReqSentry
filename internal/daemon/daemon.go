@@ -4,7 +4,9 @@ import (
 	"context"
 	"encoding/json"
 	"log"
+	"net/netip"
 	"runtime"
+	"sort"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -40,6 +42,15 @@ type Daemon struct {
 	}
 	maxMindStatus string
 	slackStatus   string
+	webStatus     atomic.Pointer[WebStatus]
+	rollup        atomic.Pointer[aggregator.Aggregator]
+}
+
+type WebStatus struct {
+	Enabled bool   `json:"enabled"`
+	Listen  string `json:"listen,omitempty"`
+	Clients int64  `json:"clients"`
+	Status  string `json:"status"`
 }
 
 type Status struct {
@@ -52,6 +63,7 @@ type Status struct {
 	SQLite        string                `json:"sqlite"`
 	MaxMind       string                `json:"maxmind"`
 	Slack         string                `json:"slack"`
+	Web           WebStatus             `json:"web"`
 }
 
 func New(cfg config.Config, logger *log.Logger) *Daemon {
@@ -87,6 +99,75 @@ func (d *Daemon) Incidents() []model.Incident {
 	return append([]model.Incident(nil), d.incidents...)
 }
 
+func (d *Daemon) ServerName() string { return d.config.Server.Name }
+
+func (d *Daemon) Enrich(ip netip.Addr) (enrichment.Result, error) {
+	if d.enricher == nil {
+		return enrichment.Result{}, nil
+	}
+	return d.enricher.Lookup(ip)
+}
+
+func (d *Daemon) Dashboard(window time.Duration, limit int) aggregator.DashboardView {
+	rollup := d.rollup.Load()
+	if rollup == nil {
+		return aggregator.DashboardView{At: time.Now(), Sites: []aggregator.DashboardSite{}}
+	}
+	view := rollup.Dashboard(window, time.Now(), limit)
+	known := make(map[string]bool, len(view.Sites))
+	for _, site := range view.Sites {
+		known[site.SiteID] = true
+	}
+	for _, file := range d.config.AccessFiles {
+		if !known[file.Site] {
+			view.Sites = append(view.Sites, aggregator.DashboardSite{SiteID: file.Site, Statuses: map[int]uint64{}, Methods: map[string]uint64{}})
+			known[file.Site] = true
+		}
+	}
+	incidents := d.Incidents()
+	cutoff := time.Now().Add(-5 * time.Minute)
+	type siteIncidentSummary struct {
+		count      int
+		suspicious map[netip.Addr]bool
+		wouldBlock map[netip.Addr]bool
+	}
+	bySite := make(map[string]*siteIncidentSummary)
+	for _, incident := range incidents {
+		if incident.Timestamp.Before(cutoff) {
+			continue
+		}
+		item := bySite[incident.SiteID]
+		if item == nil {
+			item = &siteIncidentSummary{suspicious: make(map[netip.Addr]bool), wouldBlock: make(map[netip.Addr]bool)}
+			bySite[incident.SiteID] = item
+		}
+		item.count++
+		if incident.Decision == model.DecisionSuspicious || incident.Decision == model.DecisionWouldBlock {
+			item.suspicious[incident.ClientIP] = true
+		}
+		if incident.Decision == model.DecisionWouldBlock {
+			item.wouldBlock[incident.ClientIP] = true
+		}
+	}
+	for i := range view.Sites {
+		if item := bySite[view.Sites[i].SiteID]; item != nil {
+			view.Sites[i].RecentIncidents = item.count
+			view.Sites[i].SuspiciousIPs = len(item.suspicious)
+			view.Sites[i].WouldBlockIPs = len(item.wouldBlock)
+		}
+	}
+	sort.Slice(view.Sites, func(i, j int) bool { return view.Sites[i].SiteID < view.Sites[j].SiteID })
+	return view
+}
+
+func (d *Daemon) IPSnapshot(site string, ip netip.Addr, window time.Duration) (aggregator.Snapshot, bool) {
+	rollup := d.rollup.Load()
+	if rollup == nil {
+		return aggregator.Snapshot{}, false
+	}
+	return rollup.Snapshot(site, ip, window, time.Now())
+}
+
 func (d *Daemon) SetIncidentSink(sink model.IncidentSink) {
 	d.incidentSink = sink
 }
@@ -103,6 +184,8 @@ func (d *Daemon) SetIntegrationStatus(maxmind, slack string) {
 	d.maxMindStatus = maxmind
 	d.slackStatus = slack
 }
+
+func (d *Daemon) SetWebStatus(status WebStatus) { d.webStatus.Store(&status) }
 
 func (d *Daemon) SetOperationalSink(sink interface {
 	Operational(string, string, uint64) error
@@ -132,6 +215,13 @@ func (d *Daemon) Run(ctx context.Context) error {
 		return err
 	}
 	rollup := aggregator.New(d.config.Aggregation)
+	d.rollup.Store(rollup)
+	historyDone := make(chan struct{})
+	if d.checkpointStore != nil && d.config.Web.Enabled {
+		go func() { defer close(historyDone); d.monitorDashboardHistory(ctx, rollup) }()
+	} else {
+		close(historyDone)
+	}
 	manager := watcher.New(d.config.AccessFiles, d.logger, func(event model.RequestEvent) {
 		parsed.Add(1)
 		resolved, excluded := resolver.Resolve(event)
@@ -187,6 +277,9 @@ func (d *Daemon) Run(ctx context.Context) error {
 				slackStatus = "disabled"
 			}
 			status := Status{UpdatedAt: time.Now().UTC(), Running: running, TriggerActive: d.trigger.Active(), Health: health, WatchedLogs: manager.Status(), Aggregation: rollup.Metrics(), SQLite: "available", MaxMind: maxmindStatus, Slack: slackStatus}
+			if web := d.webStatus.Load(); web != nil {
+				status.Web = *web
+			}
 			payload, _ := json.Marshal(status)
 			writeCtx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 			defer cancel()
@@ -275,6 +368,7 @@ func (d *Daemon) Run(ctx context.Context) error {
 	<-phpDone
 	<-watchDone
 	<-statusDone
+	<-historyDone
 	metrics := rollup.Metrics()
 	d.logger.Printf("ReqSentry stopped parsed_requests=%d allowlisted_requests=%d active_records=%d dropped_events=%d", parsed.Load(), allowlisted.Load(), metrics.ActiveRecords, metrics.DroppedEvents)
 	return nil

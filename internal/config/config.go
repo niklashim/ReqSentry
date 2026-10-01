@@ -92,6 +92,30 @@ type Config struct {
 	Database    DatabaseConfig    `yaml:"database"`
 	MaxMind     MaxMindConfig     `yaml:"maxmind"`
 	Output      OutputConfig      `yaml:"output"`
+	Web         WebConfig         `yaml:"web"`
+}
+
+type WebConfig struct {
+	Enabled        bool              `yaml:"enabled"`
+	Listen         string            `yaml:"listen"`
+	Port           int               `yaml:"port"`
+	AllowedIPs     []string          `yaml:"allowed_ips"`
+	TrustedProxies []string          `yaml:"trusted_proxies"`
+	Auth           WebAuthConfig     `yaml:"auth"`
+	Realtime       WebRealtimeConfig `yaml:"realtime"`
+}
+
+type WebAuthConfig struct {
+	Enabled            bool   `yaml:"enabled"`
+	Username           string `yaml:"username"`
+	PasswordEnv        string `yaml:"password_env"`
+	PasswordCredential string `yaml:"password_credential"`
+}
+
+type WebRealtimeConfig struct {
+	Enabled    *bool    `yaml:"enabled"`
+	Interval   Duration `yaml:"interval"`
+	MaxClients int      `yaml:"max_clients"`
 }
 
 type ServerConfig struct {
@@ -224,6 +248,9 @@ func (c *Config) Validate() error {
 	}
 	if len(c.AccessFiles) == 0 {
 		return errors.New("at least one access_files entry is required")
+	}
+	if c.Web.Enabled && len(c.AccessFiles) > 128 {
+		return errors.New("the dashboard supports at most 128 access_files entries")
 	}
 	if c.ClientIP.Header == "" {
 		c.ClientIP.Header = "x-forwarded-for"
@@ -406,6 +433,54 @@ func (c *Config) Validate() error {
 		}
 		if c.Output.Slack.Cooldown.Duration < 0 {
 			return errors.New("output.slack.cooldown must be positive")
+		}
+	}
+	if c.Web.Enabled {
+		if c.Web.Listen == "" {
+			c.Web.Listen = "127.0.0.1"
+		}
+		if _, err := netip.ParseAddr(c.Web.Listen); err != nil {
+			return errors.New("web.listen must be an IPv4 or IPv6 address")
+		}
+		if c.Web.Port == 0 {
+			c.Web.Port = 8090
+		}
+		if c.Web.Port < 1 || c.Web.Port > 65535 {
+			return errors.New("web.port must be between 1 and 65535")
+		}
+		for i, value := range c.Web.AllowedIPs {
+			if err := validateIPRange(value); err != nil {
+				return fmt.Errorf("web.allowed_ips[%d]: %w", i, err)
+			}
+		}
+		for i, value := range c.Web.TrustedProxies {
+			if err := validateIPRange(value); err != nil {
+				return fmt.Errorf("web.trusted_proxies[%d]: %w", i, err)
+			}
+		}
+		if c.Web.Auth.Enabled {
+			if strings.TrimSpace(c.Web.Auth.Username) == "" {
+				return errors.New("web.auth.username is required")
+			}
+			if err := validateSecretRef("web auth password", c.Web.Auth.PasswordEnv, c.Web.Auth.PasswordCredential); err != nil {
+				return err
+			}
+		}
+		if c.Web.Realtime.Enabled == nil {
+			enabled := true
+			c.Web.Realtime.Enabled = &enabled
+		}
+		if c.Web.Realtime.Interval.Duration == 0 {
+			c.Web.Realtime.Interval.Duration = 2 * time.Second
+		}
+		if c.Web.Realtime.Interval.Duration < time.Second || c.Web.Realtime.Interval.Duration > 10*time.Second {
+			return errors.New("web.realtime.interval must be 1s to 10s")
+		}
+		if c.Web.Realtime.MaxClients == 0 {
+			c.Web.Realtime.MaxClients = 32
+		}
+		if c.Web.Realtime.MaxClients < 1 || c.Web.Realtime.MaxClients > 256 {
+			return errors.New("web.realtime.max_clients must be 1 to 256")
 		}
 	}
 	return nil

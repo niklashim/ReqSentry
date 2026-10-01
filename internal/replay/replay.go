@@ -86,8 +86,8 @@ func Run(ctx context.Context, paths []string, cfg config.Config, emit func(model
 		}
 		if site == "" {
 			site = filepath.Base(path)
-			site = strings.TrimSuffix(site,".access.log")
-			site = strings.TrimSuffix(site,".log")
+			site = strings.TrimSuffix(site, ".access.log")
+			site = strings.TrimSuffix(site, ".log")
 		}
 		scanner := bufio.NewScanner(file)
 		scanner.Buffer(make([]byte, 64*1024), 1<<20)

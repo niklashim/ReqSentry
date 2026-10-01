@@ -1,0 +1,42 @@
+services:
+  reqsentry-web:
+    container_name: reqsentry-web
+    build:
+      context: .
+      dockerfile: docker/webserver/Dockerfile
+    ports:
+      - "127.0.0.1:8081:8081"
+      - "127.0.0.1:8082:8082"
+      - "127.0.0.1:8083:8083"
+      - "127.0.0.1:8084:8084"
+      - "127.0.0.1:8090:8090"
+    volumes:
+      - ./dev-data/nginx/logs:/var/log/nginx
+      - ./dev-data/reqsentry/logs:/var/log/reqsentry
+      - ./dev-data/reqsentry/data:/var/lib/reqsentry
+      - ./dev-data/reqsentry/maxmind:/var/lib/reqsentry/maxmind
+    environment:
+      REQSENTRY_MAXMIND_LICENSE_KEY: ${REQSENTRY_MAXMIND_LICENSE_KEY:-}
+      REQSENTRY_SLACK_WEBHOOK: ${REQSENTRY_SLACK_WEBHOOK:-}
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS http://127.0.0.1:8081/ >/dev/null && curl -fsS http://127.0.0.1:8082/ >/dev/null && curl -fsS http://127.0.0.1:8083/ >/dev/null && curl -fsS http://127.0.0.1:8084/ >/dev/null && curl -fsS http://127.0.0.1:8090/api/v1/status >/dev/null"]
+      interval: 10s
+      timeout: 3s
+      start_period: 20s
+      retries: 3
+
+  reqsentry-k6:
+    container_name: reqsentry-k6
+    image: grafana/k6:1.8.1
+    entrypoint: ["/bin/sh", "-c"]
+    command: ["while :; do sleep 3600; done"]
+    volumes:
+      - ./tests/k6:/scripts:ro
+    environment:
+      SITE1_URL: http://reqsentry-web:8081
+      SITE2_URL: http://reqsentry-web:8082
+      SITE3_URL: http://reqsentry-web:8083
+      SITE4_URL: http://reqsentry-web:8084
+    depends_on:
+      reqsentry-web:
+        condition: service_healthy

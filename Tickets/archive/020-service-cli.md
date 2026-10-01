@@ -16,4 +16,4 @@ Package the monitor for Linux/systemd and provide basic local diagnostics.
 - Documentation explains recommended access-log formats and how to verify each configured site is monitored.
 - A smoke test starts, restarts, and stops the service against sample logs without any traffic-changing capability.
 
-The CLI, status heartbeat, systemd unit, and [installation guide](../docs/install.md) are implemented. The daemon smoke test exercises start, restart, and stop with an access log. The systemd unit is provided for the target Linux host; it has not been run on this macOS development host.
+The CLI, status heartbeat, systemd unit, and [installation guide](../../docs/install.md) are implemented. The daemon smoke test exercises start, restart, and stop with an access log. The systemd unit is provided for the target Linux host; it has not been run on this macOS development host.

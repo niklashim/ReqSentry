@@ -17,4 +17,4 @@ Persist incidents and operational metadata for investigation without one transac
 - Persist watcher file identity and offsets so a clean restart resumes unread entries in the same active log without replaying all history. Define and test crash-window behavior explicitly.
 - Normal traffic need not be stored as every rolling window; retention behavior is documented.
 
-Retention and checkpoint limits are documented in [local history and output](../docs/storage-output.md).
+Retention and checkpoint limits are documented in [local history and output](../../docs/storage-output.md).

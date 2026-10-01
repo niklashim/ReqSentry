@@ -16,7 +16,9 @@ import (
 	"github.com/niklashim/ReqSentry/internal/model"
 )
 
-const bucketCount = 60
+// An extra bucket lets minute history close just after the minute boundary
+// without the new second overwriting its first second.
+const bucketCount = 61
 
 type key struct {
 	site string
@@ -83,22 +85,48 @@ type Identity struct {
 }
 
 type Aggregator struct {
-	mu        sync.Mutex
-	limits    config.AggregationConfig
-	records   map[key]*record
-	totals    [bucketCount]totalBucket
-	drops     [bucketCount]totalBucket
-	latest    int64
-	lastPrune int64
-	dropped   uint64
-	oldEvents uint64
-	degraded  bool
+	mu         sync.Mutex
+	limits     config.AggregationConfig
+	records    map[key]*record
+	totals     [bucketCount]totalBucket
+	siteTotals map[string]*[bucketCount]totalBucket
+	drops      [bucketCount]totalBucket
+	latest     int64
+	lastPrune  int64
+	dropped    uint64
+	oldEvents  uint64
+	degraded   bool
 }
 
 type totalBucket struct {
-	second   int64
-	used     bool
-	requests uint64
+	second         int64
+	used           bool
+	requests       uint64
+	statusFamilies [6]uint64
+	statuses       map[int]uint64
+	methods        map[string]uint64
+	methodHTTP     map[string]MethodHTTP
+}
+
+// MethodHTTP retains exact cross totals for each bounded method category.
+type MethodHTTP struct {
+	Requests  uint64 `json:"requests"`
+	Status2xx uint64 `json:"status_2xx"`
+	Status301 uint64 `json:"status_301"`
+	Status302 uint64 `json:"status_302"`
+	Status403 uint64 `json:"status_403"`
+	Status404 uint64 `json:"status_404"`
+	Status5xx uint64 `json:"status_5xx"`
+}
+
+func (m *MethodHTTP) add(other MethodHTTP) {
+	m.Requests += other.Requests
+	m.Status2xx += other.Status2xx
+	m.Status301 += other.Status301
+	m.Status302 += other.Status302
+	m.Status403 += other.Status403
+	m.Status404 += other.Status404
+	m.Status5xx += other.Status5xx
 }
 
 type record struct {
@@ -148,7 +176,7 @@ type bucket struct {
 }
 
 func New(limits config.AggregationConfig) *Aggregator {
-	return &Aggregator{limits: limits, records: make(map[key]*record)}
+	return &Aggregator{limits: limits, records: make(map[key]*record), siteTotals: make(map[string]*[bucketCount]totalBucket)}
 }
 
 // Observe counts every parsed request in the server total. An allowlisted
@@ -173,11 +201,14 @@ func (a *Aggregator) Observe(event model.RequestEvent, allowlisted bool, at time
 		a.prune(second)
 		a.lastPrune = second
 	}
-	total := &a.totals[slot(second)]
-	if !total.used || total.second != second {
-		*total = totalBucket{second: second, used: true}
+	addTotal(&a.totals[slot(second)], event, second)
+	if sites := a.siteTotals[event.SiteID]; sites != nil {
+		addTotal(&sites[slot(second)], event, second)
+	} else if len(a.siteTotals) < 128 {
+		sites = new([bucketCount]totalBucket)
+		a.siteTotals[event.SiteID] = sites
+		addTotal(&sites[slot(second)], event, second)
 	}
-	total.requests++
 	if allowlisted {
 		return true
 	}
@@ -213,12 +244,48 @@ func (a *Aggregator) Observe(event model.RequestEvent, allowlisted bool, at time
 	return true
 }
 
+func addTotal(bucket *totalBucket, event model.RequestEvent, second int64) {
+	if !bucket.used || bucket.second != second {
+		*bucket = totalBucket{second: second, used: true, statuses: make(map[int]uint64), methods: make(map[string]uint64), methodHTTP: make(map[string]MethodHTTP)}
+	}
+	bucket.requests++
+	bucket.statusFamilies[event.Status/100]++
+	switch event.Status {
+	case 301, 302, 403, 404:
+		bucket.statuses[event.Status]++
+	}
+	method := event.Method
+	if len(method) > 32 || (bucket.methods[method] == 0 && len(bucket.methods) >= 16) {
+		method = "OTHER"
+	}
+	bucket.methods[method]++
+	row := bucket.methodHTTP[method]
+	row.Requests++
+	switch event.Status {
+	case 301:
+		row.Status301++
+	case 302:
+		row.Status302++
+	case 403:
+		row.Status403++
+	case 404:
+		row.Status404++
+	}
+	if event.Status/100 == 2 {
+		row.Status2xx++
+	}
+	if event.Status/100 == 5 {
+		row.Status5xx++
+	}
+	bucket.methodHTTP[method] = row
+}
+
 func (a *Aggregator) Snapshot(site string, ip netip.Addr, window time.Duration, at time.Time) (Snapshot, bool) {
 	result := Snapshot{SiteID: site, ClientIP: ip.Unmap(), Window: window, At: at,
 		ImportantStatuses: make(map[int]uint64), Methods: make(map[string]uint64), Method404: make(map[string]uint64),
 		Method404UniquePaths: make(map[string]int), UserAgentCounts: make(map[string]uint64)}
 	seconds := int64(window / time.Second)
-	if seconds < 1 || seconds > bucketCount || window%time.Second != 0 {
+	if seconds < 1 || seconds > 60 || window%time.Second != 0 {
 		return result, false
 	}
 	a.mu.Lock()
@@ -323,7 +390,7 @@ func (a *Aggregator) Snapshot(site string, ip netip.Addr, window time.Duration, 
 
 func (a *Aggregator) TotalRequests(window time.Duration, at time.Time) uint64 {
 	seconds := int64(window / time.Second)
-	if seconds < 1 || seconds > bucketCount || window%time.Second != 0 {
+	if seconds < 1 || seconds > 60 || window%time.Second != 0 {
 		return 0
 	}
 	a.mu.Lock()
@@ -340,7 +407,7 @@ func (a *Aggregator) TotalRequests(window time.Duration, at time.Time) uint64 {
 
 func (a *Aggregator) SiteCount(ip netip.Addr, window time.Duration, at time.Time) int {
 	seconds := int64(window / time.Second)
-	if seconds < 1 || seconds > bucketCount || window%time.Second != 0 {
+	if seconds < 1 || seconds > 60 || window%time.Second != 0 {
 		return 0
 	}
 	a.mu.Lock()
@@ -364,7 +431,7 @@ func (a *Aggregator) SiteCount(ip netip.Addr, window time.Duration, at time.Time
 // ActiveIdentities returns bounded candidates for periodic deep analysis.
 func (a *Aggregator) ActiveIdentities(window time.Duration, at time.Time) []Identity {
 	seconds := int64(window / time.Second)
-	if seconds < 1 || seconds > bucketCount || window%time.Second != 0 {
+	if seconds < 1 || seconds > 60 || window%time.Second != 0 {
 		return nil
 	}
 	a.mu.Lock()

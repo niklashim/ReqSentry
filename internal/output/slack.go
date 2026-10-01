@@ -34,6 +34,8 @@ type Slack struct {
 	logger   *log.Logger
 	queue    chan slackMessage
 	done     chan struct{}
+	ctx      context.Context
+	cancel   context.CancelFunc
 	mu       sync.Mutex
 	closed   bool
 	last     map[string]time.Time
@@ -49,7 +51,8 @@ func NewSlack(cfg config.SlackOutputConfig, logger *log.Logger) (*Slack, error) 
 	if err != nil || parsed.Scheme != "https" || parsed.User != nil || (parsed.Hostname() != "hooks.slack.com" && parsed.Hostname() != "hooks.slack-gov.com") || !strings.HasPrefix(parsed.Path, "/services/") {
 		return nil, errors.New("Slack webhook must be an HTTPS incoming webhook URL")
 	}
-	s := &Slack{webhook: secret, config: cfg, client: &http.Client{Timeout: 5 * time.Second}, logger: logger, queue: make(chan slackMessage, 128), done: make(chan struct{}), last: make(map[string]time.Time)}
+	ctx, cancel := context.WithCancel(context.Background())
+	s := &Slack{webhook: secret, config: cfg, client: &http.Client{Timeout: 5 * time.Second}, logger: logger, queue: make(chan slackMessage, 128), done: make(chan struct{}), ctx: ctx, cancel: cancel, last: make(map[string]time.Time)}
 	s.client.CheckRedirect = func(request *http.Request, via []*http.Request) error {
 		if len(via) >= 3 || request.URL.Scheme != "https" || request.URL.Hostname() != parsed.Hostname() {
 			return errors.New("Slack webhook redirect rejected")
@@ -143,8 +146,11 @@ func (s *Slack) enqueue(key string, at time.Time, cooldown time.Duration, messag
 func (s *Slack) run() {
 	defer close(s.done)
 	for message := range s.queue {
+		if s.ctx.Err() != nil {
+			return
+		}
 		body, _ := json.Marshal(message)
-		request, err := http.NewRequest(http.MethodPost, s.webhook, bytes.NewReader(body))
+		request, err := http.NewRequestWithContext(s.ctx, http.MethodPost, s.webhook, bytes.NewReader(body))
 		if err == nil {
 			request.Header.Set("Content-Type", "application/json")
 			response, postErr := s.client.Do(request)
@@ -176,5 +182,11 @@ func (s *Slack) Close() {
 		close(s.queue)
 	}
 	s.mu.Unlock()
-	<-s.done
+	select {
+	case <-s.done:
+	case <-time.After(5 * time.Second):
+		s.cancel()
+		<-s.done
+	}
+	s.cancel()
 }

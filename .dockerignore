@@ -1,0 +1,10 @@
+.git
+.env
+.codex
+.agents
+dev-data
+Tickets
+docs
+tests/k6
+logo.png
+**/*_test.go

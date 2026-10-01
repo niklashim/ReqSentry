@@ -1,0 +1,37 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="dark">
+  <title>ReqSentry · Monitor</title>
+  <link rel="stylesheet" href="/style.css">
+  <script src="/app.js" defer></script>
+</head>
+<body>
+  <div class="shell">
+    <aside class="sidebar">
+      <div class="brand"><span class="brand-icon">R</span><span>ReqSentry<small>OBSERVABILITY</small></span></div>
+      <nav aria-label="Dashboard sections">
+        <a href="#overview" data-page="overview">Overview</a>
+        <a href="#sites" data-page="sites">Sites</a>
+        <a href="#ips" data-page="ips">IP explorer</a>
+        <a href="#networks" data-page="networks">Networks</a>
+        <a href="#http" data-page="http">HTTP analytics</a>
+        <a href="#health" data-page="health">Server health</a>
+        <a href="#phpfpm" data-page="phpfpm">PHP-FPM</a>
+        <a href="#incidents" data-page="incidents">Incidents</a>
+      </nav>
+      <div class="sidefoot"><span class="green-dot"></span> READ ONLY · MONITOR V1</div>
+    </aside>
+    <div class="mainwrap">
+      <header class="topbar">
+        <div><span class="eyebrow">SERVER CONSOLE</span><h1 id="page-title">Overview</h1></div>
+        <div class="top-actions"><span id="server-name" class="server-pill">—</span><span id="connection" class="connection">Connecting</span><button id="refresh" type="button">Refresh</button></div>
+      </header>
+      <main id="content" tabindex="-1"><div class="empty">Loading dashboard…</div></main>
+      <footer>ReqSentry · Monitor mode · All actions are read-only</footer>
+    </div>
+  </div>
+</body>
+</html>

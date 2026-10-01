@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -23,6 +24,7 @@ var ErrClosed = errors.New("SQLite store closed")
 
 type Store struct {
 	db          *sql.DB
+	readDB      *sql.DB
 	diagnostics io.Writer
 	queue       chan writeRequest
 	done        chan struct{}
@@ -83,7 +85,24 @@ func Open(path string, diagnostics io.Writer) (*Store, error) {
 		_ = db.Close()
 		return nil, err
 	}
-	s := &Store{db: db, diagnostics: diagnostics, queue: make(chan writeRequest, 256), done: make(chan struct{})}
+	absolutePath, err := filepath.Abs(path)
+	if err != nil {
+		_ = db.Close()
+		return nil, err
+	}
+	readURL := (&url.URL{Scheme: "file", Path: absolutePath}).String() + "?mode=ro&_pragma=busy_timeout%3D1000"
+	readDB, err := sql.Open("sqlite", readURL)
+	if err != nil {
+		_ = db.Close()
+		return nil, err
+	}
+	readDB.SetMaxOpenConns(2)
+	if err := readDB.Ping(); err != nil {
+		_ = readDB.Close()
+		_ = db.Close()
+		return nil, fmt.Errorf("open SQLite dashboard reader: %w", err)
+	}
+	s := &Store{db: db, readDB: readDB, diagnostics: diagnostics, queue: make(chan writeRequest, 256), done: make(chan struct{})}
 	go s.run()
 	return s, nil
 }
@@ -93,40 +112,119 @@ func migrate(db *sql.DB) error {
 	if err := db.QueryRow("PRAGMA user_version").Scan(&version); err != nil {
 		return err
 	}
-	if version > 1 {
-		return fmt.Errorf("SQLite schema version %d is newer than supported version 1", version)
-	}
-	if version == 1 {
-		return nil
+	if version > 3 {
+		return fmt.Errorf("SQLite schema version %d is newer than supported version 3", version)
 	}
 	tx, err := db.Begin()
 	if err != nil {
 		return err
 	}
 	defer tx.Rollback()
-	statements := []string{
-		`CREATE TABLE IF NOT EXISTS sites (id TEXT PRIMARY KEY)`,
-		`CREATE TABLE IF NOT EXISTS ips (address TEXT PRIMARY KEY)`,
-		`CREATE TABLE IF NOT EXISTS incidents (
+	if version == 0 {
+		statements := []string{
+			`CREATE TABLE IF NOT EXISTS sites (id TEXT PRIMARY KEY)`,
+			`CREATE TABLE IF NOT EXISTS ips (address TEXT PRIMARY KEY)`,
+			`CREATE TABLE IF NOT EXISTS incidents (
 			id INTEGER PRIMARY KEY, timestamp TEXT NOT NULL, site_id TEXT NOT NULL,
 			ip_address TEXT NOT NULL, score INTEGER NOT NULL, decision TEXT NOT NULL,
 			ruleset_version INTEGER NOT NULL, payload_json TEXT NOT NULL,
 			FOREIGN KEY(site_id) REFERENCES sites(id), FOREIGN KEY(ip_address) REFERENCES ips(address))`,
-		`CREATE INDEX IF NOT EXISTS incident_time ON incidents(timestamp DESC)`,
-		`CREATE TABLE IF NOT EXISTS traffic_windows (
+			`CREATE INDEX IF NOT EXISTS incident_time ON incidents(timestamp DESC)`,
+			`CREATE TABLE IF NOT EXISTS traffic_windows (
 			incident_id INTEGER PRIMARY KEY, window_start TEXT NOT NULL, window_end TEXT NOT NULL,
 			requests INTEGER NOT NULL, peak_rps INTEGER NOT NULL,
 			FOREIGN KEY(incident_id) REFERENCES incidents(id) ON DELETE CASCADE)`,
-		`CREATE TABLE IF NOT EXISTS system_state (
+			`CREATE TABLE IF NOT EXISTS system_state (
 			key TEXT PRIMARY KEY, value TEXT NOT NULL, updated_at TEXT NOT NULL)`,
-		`CREATE TABLE IF NOT EXISTS watcher_offsets (
+			`CREATE TABLE IF NOT EXISTS watcher_offsets (
 			path TEXT PRIMARY KEY, device TEXT NOT NULL, inode TEXT NOT NULL,
 			byte_offset INTEGER NOT NULL, updated_at TEXT NOT NULL)`,
-		`PRAGMA user_version=1`,
+		}
+		for _, statement := range statements {
+			if _, err := tx.Exec(statement); err != nil {
+				return fmt.Errorf("SQLite migration: %w", err)
+			}
+		}
 	}
-	for _, statement := range statements {
-		if _, err := tx.Exec(statement); err != nil {
-			return fmt.Errorf("SQLite migration: %w", err)
+	if version < 2 {
+		for _, statement := range []string{
+			`CREATE TABLE IF NOT EXISTS incident_signals (incident_id INTEGER NOT NULL, code TEXT NOT NULL, PRIMARY KEY(incident_id,code), FOREIGN KEY(incident_id) REFERENCES incidents(id) ON DELETE CASCADE)`,
+			`CREATE INDEX IF NOT EXISTS incident_signals_code ON incident_signals(code,incident_id)`,
+			`INSERT OR IGNORE INTO incident_signals(incident_id,code) SELECT incidents.id,json_extract(value,'$.code') FROM incidents,json_each(incidents.payload_json,'$.signals') WHERE json_extract(value,'$.code') IS NOT NULL`,
+			`CREATE TABLE IF NOT EXISTS dashboard_minutes (bucket_start INTEGER NOT NULL, site_id TEXT NOT NULL, payload_json TEXT NOT NULL, PRIMARY KEY(bucket_start,site_id))`,
+			`CREATE INDEX IF NOT EXISTS dashboard_minutes_site_time ON dashboard_minutes(site_id,bucket_start)`,
+			`PRAGMA user_version=2`,
+		} {
+			if _, err := tx.Exec(statement); err != nil {
+				return fmt.Errorf("SQLite migration v2: %w", err)
+			}
+		}
+	}
+	if version < 3 {
+		rows, err := tx.Query(`PRAGMA table_info(incidents)`)
+		if err != nil {
+			return err
+		}
+		hasNanoseconds := false
+		for rows.Next() {
+			var position int
+			var name, kind string
+			var notNull, primary int
+			var defaultValue sql.NullString
+			if err := rows.Scan(&position, &name, &kind, &notNull, &defaultValue, &primary); err != nil {
+				rows.Close()
+				return err
+			}
+			if name == "timestamp_ns" {
+				hasNanoseconds = true
+			}
+		}
+		if err := rows.Err(); err != nil {
+			rows.Close()
+			return err
+		}
+		rows.Close()
+		if !hasNanoseconds {
+			if _, err := tx.Exec(`ALTER TABLE incidents ADD COLUMN timestamp_ns INTEGER NOT NULL DEFAULT 0`); err != nil {
+				return err
+			}
+		}
+		rows, err = tx.Query(`SELECT id,timestamp FROM incidents WHERE timestamp_ns=0`)
+		if err != nil {
+			return err
+		}
+		type timestampRow struct {
+			id    int64
+			value string
+		}
+		var backfill []timestampRow
+		for rows.Next() {
+			var item timestampRow
+			if err := rows.Scan(&item.id, &item.value); err != nil {
+				rows.Close()
+				return err
+			}
+			backfill = append(backfill, item)
+		}
+		if err := rows.Err(); err != nil {
+			rows.Close()
+			return err
+		}
+		rows.Close()
+		for _, item := range backfill {
+			parsed, err := time.Parse(time.RFC3339Nano, item.value)
+			if err != nil {
+				return fmt.Errorf("invalid stored incident timestamp id=%d: %w", item.id, err)
+			}
+			if _, err := tx.Exec(`UPDATE incidents SET timestamp_ns=? WHERE id=?`, parsed.UnixNano(), item.id); err != nil {
+				return err
+			}
+		}
+		if _, err := tx.Exec(`CREATE INDEX IF NOT EXISTS incident_time_ns ON incidents(timestamp_ns DESC)`); err != nil {
+			return err
+		}
+		if _, err := tx.Exec(`PRAGMA user_version=3`); err != nil {
+			return err
 		}
 	}
 	return tx.Commit()
@@ -241,14 +339,19 @@ func (s *Store) insertBatch(batch []model.Incident) error {
 		if _, err := tx.Exec(`INSERT OR IGNORE INTO ips(address) VALUES(?)`, ip); err != nil {
 			return err
 		}
-		result, err := tx.Exec(`INSERT INTO incidents(timestamp,site_id,ip_address,score,decision,ruleset_version,payload_json) VALUES(?,?,?,?,?,?,?)`,
-			incident.Timestamp.UTC().Format(time.RFC3339Nano), incident.SiteID, ip, incident.Score, incident.Decision, incident.RulesetVersion, string(payload))
+		result, err := tx.Exec(`INSERT INTO incidents(timestamp,timestamp_ns,site_id,ip_address,score,decision,ruleset_version,payload_json) VALUES(?,?,?,?,?,?,?,?)`,
+			incident.Timestamp.UTC().Format(time.RFC3339Nano), incident.Timestamp.UnixNano(), incident.SiteID, ip, incident.Score, incident.Decision, incident.RulesetVersion, string(payload))
 		if err != nil {
 			return err
 		}
 		id, err := result.LastInsertId()
 		if err != nil {
 			return err
+		}
+		for _, signal := range incident.Signals {
+			if _, err := tx.Exec(`INSERT OR IGNORE INTO incident_signals(incident_id,code) VALUES(?,?)`, id, signal.Code); err != nil {
+				return err
+			}
 		}
 		if _, err := tx.Exec(`INSERT INTO traffic_windows(incident_id,window_start,window_end,requests,peak_rps) VALUES(?,?,?,?,?)`,
 			id, incident.WindowStart.UTC().Format(time.RFC3339Nano), incident.WindowEnd.UTC().Format(time.RFC3339Nano), incident.Requests, incident.PeakRPS); err != nil {
@@ -331,5 +434,6 @@ func (s *Store) Close() error {
 	}
 	s.mu.Unlock()
 	<-s.done
-	return s.db.Close()
+	readErr := s.readDB.Close()
+	return errors.Join(readErr, s.db.Close())
 }

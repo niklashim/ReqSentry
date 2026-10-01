@@ -109,3 +109,28 @@ func TestSecretReferences(t *testing.T) {
 		t.Fatalf("credential reference: value=%q error=%v", got, err)
 	}
 }
+
+func TestWebDefaultsAndValidation(t *testing.T) {
+	cfg, err := loadText(t, minimalConfig+"web:\n  enabled: true\n  allowed_ips: [127.0.0.1, '2001:db8::/48']\n")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Web.Listen != "127.0.0.1" || cfg.Web.Port != 8090 || cfg.Web.Realtime.Interval.Duration != 2*time.Second || cfg.Web.Realtime.Enabled == nil || !*cfg.Web.Realtime.Enabled {
+		t.Fatalf("web defaults: %+v", cfg.Web)
+	}
+	for _, item := range []struct{ name, text, want string }{
+		{"bad listen", "listen: example.com\n", "web.listen"},
+		{"bad port", "port: 99999\n", "web.port"},
+		{"bad allowed", "allowed_ips: [bad]\n", "web.allowed_ips"},
+		{"trust all", "allowed_ips: [0.0.0.0/0]\n", "web.allowed_ips"},
+		{"bad proxy", "trusted_proxies: [bad]\n", "web.trusted_proxies"},
+		{"auth no secret", "auth:\n    enabled: true\n    username: admin\n", "web auth password"},
+	} {
+		t.Run(item.name, func(t *testing.T) {
+			_, err := loadText(t, minimalConfig+"web:\n  enabled: true\n  "+item.text)
+			if err == nil || !strings.Contains(err.Error(), item.want) {
+				t.Fatalf("expected %q, got %v", item.want, err)
+			}
+		})
+	}
+}

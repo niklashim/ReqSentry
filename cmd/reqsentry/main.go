@@ -17,6 +17,7 @@ import (
 
 	"github.com/niklashim/ReqSentry/internal/config"
 	"github.com/niklashim/ReqSentry/internal/daemon"
+	"github.com/niklashim/ReqSentry/internal/dashboard"
 	"github.com/niklashim/ReqSentry/internal/enrichment"
 	"github.com/niklashim/ReqSentry/internal/maxmindupdate"
 	"github.com/niklashim/ReqSentry/internal/model"
@@ -158,6 +159,25 @@ func run(args []string, stdout, stderr io.Writer) int {
 	if len(sinks) > 0 {
 		service.SetIncidentSink(sinks)
 	}
+	var webDone chan struct{}
+	if cfg.Web.Enabled {
+		web, webErr := dashboard.New(cfg.Web, service, store, logger)
+		if webErr != nil {
+			logger.Printf("dashboard unavailable; local monitoring continues: %v", webErr)
+			service.SetWebStatus(daemon.WebStatus{Enabled: true, Status: "config_error"})
+		} else {
+			web.OnState = func(state dashboard.State) {
+				service.SetWebStatus(daemon.WebStatus{Enabled: state.Enabled, Listen: state.Listen, Clients: state.Clients, Status: state.Status})
+			}
+			webDone = make(chan struct{})
+			go func() {
+				defer close(webDone)
+				if err := web.Run(ctx); err != nil {
+					logger.Printf("dashboard unavailable; local monitoring continues: %v", err)
+				}
+			}()
+		}
+	}
 	var updateDone chan struct{}
 	if cfg.MaxMind.Enabled && cfg.MaxMind.Update.Enabled && store != nil && manager != nil {
 		updateDone = make(chan struct{})
@@ -175,12 +195,18 @@ func run(args []string, stdout, stderr io.Writer) int {
 		if updateDone != nil {
 			<-updateDone
 		}
+		if webDone != nil {
+			<-webDone
+		}
 		fmt.Fprintln(stderr, err)
 		return 1
 	}
 	stop()
 	if updateDone != nil {
 		<-updateDone
+	}
+	if webDone != nil {
+		<-webDone
 	}
 	return 0
 }
@@ -210,7 +236,7 @@ func runOperator(command string, limit int, cfg config.Config, stdout, stderr io
 		var status daemon.Status
 		if found {
 			if err := json.Unmarshal([]byte(value), &status); err != nil {
-				fmt.Fprintln(stderr,"invalid daemon status:",err)
+				fmt.Fprintln(stderr, "invalid daemon status:", err)
 				return 1
 			}
 			if time.Since(status.UpdatedAt) > 30*time.Second {
@@ -269,12 +295,14 @@ func runOperator(command string, limit int, cfg config.Config, stdout, stderr io
 				Edition           string              `json:"edition"`
 				Path              string              `json:"path"`
 				DatabaseAvailable bool                `json:"database_available"`
-				DatabaseError string `json:"database_error,omitempty"`
+				DatabaseError     string              `json:"database_error,omitempty"`
 				State             maxmindupdate.State `json:"state"`
 			}{
 				Edition: cfg.MaxMind.Edition, Path: filepath.Join(cfg.MaxMind.DatabaseDir, cfg.MaxMind.Edition+".mmdb"), DatabaseAvailable: readerErr == nil, State: state,
 			}
-			if readerErr != nil { result.DatabaseError = readerErr.Error() }
+			if readerErr != nil {
+				result.DatabaseError = readerErr.Error()
+			}
 			if err := encoder.Encode(result); err != nil {
 				fmt.Fprintln(stderr, err)
 				return 1

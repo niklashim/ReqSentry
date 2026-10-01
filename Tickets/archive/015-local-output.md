@@ -16,4 +16,4 @@ Expose daemon health and incidents locally through human-readable logs and struc
 - `WOULD_BLOCK` and similar decisions clearly state that no action was taken.
 - File permissions and rotation behavior are documented for Linux deployment.
 
-File permissions and rotation are documented in [local history and output](../docs/storage-output.md).
+File permissions and rotation are documented in [local history and output](../../docs/storage-output.md).
