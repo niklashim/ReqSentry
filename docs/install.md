@@ -22,7 +22,7 @@ sudo setfacl -m u:reqsentry:rx /var/log/nginx
 sudo setfacl -m u:reqsentry:r /var/log/nginx/site1.access.log
 ```
 
-The ACL for newly rotated logs must also be applied by the log rotation policy. Repeat for each configured Nginx or Apache file. ReqSentry needs write access to its SQLite state and output directories. Keep the YAML readable by the service account, but do not put webhook URLs or MaxMind license keys in it. For systemd, enable the commented `LoadCredential` lines in [reqsentry.service](../deploy/reqsentry.service), store those files as root-owned mode `0600`, and set `license_key_credential` or `webhook_credential` in YAML. Environment variable references are also supported.
+The ACL for newly rotated logs must also be applied by the log rotation policy. Repeat for each configured Nginx or Apache file. ReqSentry needs write access to its SQLite state and output directories. Keep the YAML readable by the service account, but do not put webhook URLs, MaxMind license keys, or dashboard passwords in it. For systemd, enable the commented `LoadCredential` lines in [reqsentry.service](../deploy/reqsentry.service), store those files as root-owned mode `0600`, and set `license_key_credential`, `webhook_credential`, or `web.auth.password_credential` in YAML. Environment variable references are also supported. [Dashboard operations](dashboard.md) covers the optional loopback listener, SSH tunneling, and access policy.
 
 ```sh
 sudo install -o root -g root -m 0644 deploy/reqsentry.service /etc/systemd/system/reqsentry.service
