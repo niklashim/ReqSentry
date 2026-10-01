@@ -1,0 +1,2 @@
+192.0.2.10 - - [01/Oct/2026:12:00:00 +0200] "GET /products?id=42 HTTP/1.1" 404 123 "-" "Mozilla/5.0"
+2001:db8::42 - - [01/Oct/2026:12:00:01 +0200] "POST /api/items?q=a%20b HTTP/2.0" 201 0 "https://example.test/a\x22b" "client\x5ctool" host="shop.example.test" rt="0.123" urt="0.120"

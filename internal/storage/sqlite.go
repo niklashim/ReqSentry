@@ -1,0 +1,313 @@
+// Package storage keeps incident history and small daemon state in SQLite.
+package storage
+
+import (
+	"context"
+	"database/sql"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"io"
+	"os"
+	"path/filepath"
+	"strconv"
+	"sync"
+	"time"
+
+	"github.com/niklashim/ReqSentry/internal/model"
+	_ "modernc.org/sqlite"
+)
+
+var ErrQueueFull = errors.New("SQLite incident queue full")
+var ErrClosed = errors.New("SQLite store closed")
+
+type Store struct {
+	db          *sql.DB
+	diagnostics io.Writer
+	queue       chan writeRequest
+	done        chan struct{}
+	mu          sync.Mutex
+	closed      bool
+}
+
+type writeRequest struct {
+	incident *model.Incident
+	barrier  chan error
+}
+
+type Offset struct {
+	Device uint64
+	Inode  uint64
+	Bytes  int64
+}
+
+func Open(path string, diagnostics io.Writer) (*Store, error) {
+	if err := os.MkdirAll(filepath.Dir(path), 0700); err != nil {
+		return nil, fmt.Errorf("create SQLite directory: %w", err)
+	}
+	file, err := os.OpenFile(path, os.O_CREATE|os.O_RDWR, 0600)
+	if err != nil {
+		return nil, fmt.Errorf("open SQLite file: %w", err)
+	}
+	if err := file.Chmod(0600); err != nil {
+		_ = file.Close()
+		return nil, fmt.Errorf("protect SQLite file: %w", err)
+	}
+	if err := file.Close(); err != nil {
+		return nil, err
+	}
+	db, err := sql.Open("sqlite", path)
+	if err != nil {
+		return nil, err
+	}
+	db.SetMaxOpenConns(1)
+	for _, pragma := range []string{"PRAGMA busy_timeout=5000", "PRAGMA journal_mode=WAL", "PRAGMA foreign_keys=ON"} {
+		if _, err := db.Exec(pragma); err != nil {
+			_ = db.Close()
+			return nil, fmt.Errorf("SQLite setup %s: %w", pragma, err)
+		}
+	}
+	if err := migrate(db); err != nil {
+		_ = db.Close()
+		return nil, err
+	}
+	s := &Store{db: db, diagnostics: diagnostics, queue: make(chan writeRequest, 256), done: make(chan struct{})}
+	go s.run()
+	return s, nil
+}
+
+func migrate(db *sql.DB) error {
+	var version int
+	if err := db.QueryRow("PRAGMA user_version").Scan(&version); err != nil {
+		return err
+	}
+	if version > 1 {
+		return fmt.Errorf("SQLite schema version %d is newer than supported version 1", version)
+	}
+	if version == 1 {
+		return nil
+	}
+	tx, err := db.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	statements := []string{
+		`CREATE TABLE IF NOT EXISTS sites (id TEXT PRIMARY KEY)`,
+		`CREATE TABLE IF NOT EXISTS ips (address TEXT PRIMARY KEY)`,
+		`CREATE TABLE IF NOT EXISTS incidents (
+			id INTEGER PRIMARY KEY, timestamp TEXT NOT NULL, site_id TEXT NOT NULL,
+			ip_address TEXT NOT NULL, score INTEGER NOT NULL, decision TEXT NOT NULL,
+			ruleset_version INTEGER NOT NULL, payload_json TEXT NOT NULL,
+			FOREIGN KEY(site_id) REFERENCES sites(id), FOREIGN KEY(ip_address) REFERENCES ips(address))`,
+		`CREATE INDEX IF NOT EXISTS incident_time ON incidents(timestamp DESC)`,
+		`CREATE TABLE IF NOT EXISTS traffic_windows (
+			incident_id INTEGER PRIMARY KEY, window_start TEXT NOT NULL, window_end TEXT NOT NULL,
+			requests INTEGER NOT NULL, peak_rps INTEGER NOT NULL,
+			FOREIGN KEY(incident_id) REFERENCES incidents(id) ON DELETE CASCADE)`,
+		`CREATE TABLE IF NOT EXISTS system_state (
+			key TEXT PRIMARY KEY, value TEXT NOT NULL, updated_at TEXT NOT NULL)`,
+		`CREATE TABLE IF NOT EXISTS watcher_offsets (
+			path TEXT PRIMARY KEY, device TEXT NOT NULL, inode TEXT NOT NULL,
+			byte_offset INTEGER NOT NULL, updated_at TEXT NOT NULL)`,
+		`PRAGMA user_version=1`,
+	}
+	for _, statement := range statements {
+		if _, err := tx.Exec(statement); err != nil {
+			return fmt.Errorf("SQLite migration: %w", err)
+		}
+	}
+	return tx.Commit()
+}
+
+// WriteIncident queues an immutable snapshot; database work happens in batches
+// on a worker and never on the log watcher path.
+func (s *Store) WriteIncident(_ context.Context, incident model.Incident) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.closed {
+		return ErrClosed
+	}
+	select {
+	case s.queue <- writeRequest{incident: &incident}:
+		return nil
+	default:
+		return ErrQueueFull
+	}
+}
+
+// Flush waits until all previously queued incidents have committed. It is
+// used before clean watcher offsets advance on shutdown.
+func (s *Store) Flush(ctx context.Context) error {
+	barrier := make(chan error, 1)
+	s.mu.Lock()
+	if s.closed {
+		s.mu.Unlock()
+		return ErrClosed
+	}
+	select {
+	case s.queue <- writeRequest{barrier: barrier}:
+		s.mu.Unlock()
+	case <-ctx.Done():
+		s.mu.Unlock()
+		return ctx.Err()
+	}
+	select {
+	case err := <-barrier:
+		return err
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+}
+
+func (s *Store) run() {
+	defer close(s.done)
+	batch := make([]model.Incident, 0, 64)
+	var priorError error
+	ticker := time.NewTicker(250 * time.Millisecond)
+	defer ticker.Stop()
+	flush := func() error {
+		if len(batch) == 0 {
+			return nil
+		}
+		err := s.insertBatch(batch)
+		if err != nil {
+			priorError = errors.Join(priorError, err)
+			fmt.Fprintf(s.diagnostics, "ReqSentry SQLite incident batch failed count=%d: %v\n", len(batch), err)
+		}
+		batch = batch[:0]
+		return err
+	}
+	for {
+		select {
+		case request, ok := <-s.queue:
+			if !ok {
+				_ = flush()
+				return
+			}
+			if request.barrier != nil {
+				_ = flush()
+				request.barrier <- priorError
+				priorError = nil
+				continue
+			}
+			batch = append(batch, *request.incident)
+			if len(batch) == cap(batch) {
+				_ = flush()
+			}
+		case <-ticker.C:
+			_ = flush()
+		}
+	}
+}
+
+func (s *Store) insertBatch(batch []model.Incident) error {
+	tx, err := s.db.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	for _, incident := range batch {
+		payload, err := json.Marshal(incident)
+		if err != nil {
+			return err
+		}
+		ip := incident.ClientIP.Unmap().String()
+		if _, err := tx.Exec(`INSERT OR IGNORE INTO sites(id) VALUES(?)`, incident.SiteID); err != nil {
+			return err
+		}
+		if _, err := tx.Exec(`INSERT OR IGNORE INTO ips(address) VALUES(?)`, ip); err != nil {
+			return err
+		}
+		result, err := tx.Exec(`INSERT INTO incidents(timestamp,site_id,ip_address,score,decision,ruleset_version,payload_json) VALUES(?,?,?,?,?,?,?)`,
+			incident.Timestamp.UTC().Format(time.RFC3339Nano), incident.SiteID, ip, incident.Score, incident.Decision, incident.RulesetVersion, string(payload))
+		if err != nil {
+			return err
+		}
+		id, err := result.LastInsertId()
+		if err != nil {
+			return err
+		}
+		if _, err := tx.Exec(`INSERT INTO traffic_windows(incident_id,window_start,window_end,requests,peak_rps) VALUES(?,?,?,?,?)`,
+			id, incident.WindowStart.UTC().Format(time.RFC3339Nano), incident.WindowEnd.UTC().Format(time.RFC3339Nano), incident.Requests, incident.PeakRPS); err != nil {
+			return err
+		}
+	}
+	return tx.Commit()
+}
+
+func (s *Store) RecentIncidents(ctx context.Context, limit int) ([]model.Incident, error) {
+	if limit < 1 || limit > 1000 {
+		return nil, errors.New("incident limit must be between 1 and 1000")
+	}
+	rows, err := s.db.QueryContext(ctx, `SELECT payload_json FROM incidents ORDER BY id DESC LIMIT ?`, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var result []model.Incident
+	for rows.Next() {
+		var payload string
+		if err := rows.Scan(&payload); err != nil {
+			return nil, err
+		}
+		var incident model.Incident
+		if err := json.Unmarshal([]byte(payload), &incident); err != nil {
+			return nil, err
+		}
+		result = append(result, incident)
+	}
+	return result, rows.Err()
+}
+
+func (s *Store) SetState(ctx context.Context, key, value string) error {
+	_, err := s.db.ExecContext(ctx, `INSERT INTO system_state(key,value,updated_at) VALUES(?,?,?)
+		ON CONFLICT(key) DO UPDATE SET value=excluded.value, updated_at=excluded.updated_at`, key, value, time.Now().UTC().Format(time.RFC3339Nano))
+	return err
+}
+
+func (s *Store) GetState(ctx context.Context, key string) (string, bool, error) {
+	var value string
+	err := s.db.QueryRowContext(ctx, `SELECT value FROM system_state WHERE key=?`, key).Scan(&value)
+	if errors.Is(err, sql.ErrNoRows) {
+		return "", false, nil
+	}
+	return value, err == nil, err
+}
+
+func (s *Store) SaveOffset(ctx context.Context, path string, offset Offset) error {
+	_, err := s.db.ExecContext(ctx, `INSERT INTO watcher_offsets(path,device,inode,byte_offset,updated_at) VALUES(?,?,?,?,?)
+		ON CONFLICT(path) DO UPDATE SET device=excluded.device,inode=excluded.inode,byte_offset=excluded.byte_offset,updated_at=excluded.updated_at`,
+		path, strconv.FormatUint(offset.Device, 10), strconv.FormatUint(offset.Inode, 10), offset.Bytes, time.Now().UTC().Format(time.RFC3339Nano))
+	return err
+}
+
+func (s *Store) LoadOffset(ctx context.Context, path string) (Offset, bool, error) {
+	var device, inode string
+	var offset Offset
+	err := s.db.QueryRowContext(ctx, `SELECT device,inode,byte_offset FROM watcher_offsets WHERE path=?`, path).Scan(&device, &inode, &offset.Bytes)
+	if errors.Is(err, sql.ErrNoRows) {
+		return Offset{}, false, nil
+	}
+	if err != nil {
+		return Offset{}, false, err
+	}
+	if offset.Device, err = strconv.ParseUint(device, 10, 64); err != nil {
+		return Offset{}, false, err
+	}
+	if offset.Inode, err = strconv.ParseUint(inode, 10, 64); err != nil {
+		return Offset{}, false, err
+	}
+	return offset, true, nil
+}
+
+func (s *Store) Close() error {
+	s.mu.Lock()
+	if !s.closed {
+		s.closed = true
+		close(s.queue)
+	}
+	s.mu.Unlock()
+	<-s.done
+	return s.db.Close()
+}

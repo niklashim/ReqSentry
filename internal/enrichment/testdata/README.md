@@ -1,0 +1,1 @@
+`GeoIP2-Enterprise.mmdb` is a synthetic test database from [MaxMind-DB test data](https://github.com/maxmind/MaxMind-DB/tree/main/test-data), copied from `GeoIP2-Enterprise-Test.mmdb`. Copyright MaxMind, Inc.; distributed under the included [MIT license](LICENSE-MIT). It is test data and must not be used for production enrichment.

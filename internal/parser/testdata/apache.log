@@ -1,0 +1,2 @@
+198.51.100.7 - - [01/Oct/2026:12:00:02 +0200] "GET / HTTP/1.1" 200 - "-" "curl/8.0"
+shop.example.test 2001:db8::5 - - [01/Oct/2026:12:00:03 +0200] "OPTIONS /api?x=1 HTTP/1.1" 204 0 "-" "api-client\"test" host="shop.example.test" rt_us="2500"

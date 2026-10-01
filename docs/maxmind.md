@@ -1,0 +1,7 @@
+# Local MaxMind enrichment
+
+Set `maxmind.enabled: true` and place one or more MMDB files in `maxmind.database_dir`. ReqSentry recognizes `GeoIP2-Enterprise.mmdb`, `GeoIP2-ISP.mmdb`, `GeoLite2-ASN.mmdb`, `GeoIP2-City.mmdb`, `GeoLite2-City.mmdb`, `GeoIP2-Country.mmdb`, and `GeoLite2-Country.mmdb`. It reads them locally only when an incident is produced; access-log ingestion makes no MMDB or network call.
+
+Available fields include ASN, ASN organization, ISP, country ISO code, and the database's user or connection type. Fields absent from a database remain absent in the incident. The incident records whether enrichment was available, had no matching IP, or failed. A `hosting` user type adds a small supporting signal; it cannot by itself produce `WOULD_BLOCK`. MaxMind's [Enterprise binary field reference](https://dev.maxmind.com/geoip/docs/databases/enterprise/binary/) describes the source fields. These values are metadata, not proof of malicious behavior.
+
+MMDB files are opened and validated before use. Reader replacement opens and validates new files before swapping them under a lock, so concurrent lookups finish on the old reader. Replace files by writing a new file and renaming it into place, then call the manager's `Reload` path; automatic downloads and scheduled reloads are tracked by [ticket 017](../Tickets/017-maxmind-updates.md). A missing or invalid file leaves detection running. Local MMDB data is not included with the daemon; provide databases under your own MaxMind license or GeoLite account.

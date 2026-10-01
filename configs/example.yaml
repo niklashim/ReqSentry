@@ -1,0 +1,87 @@
+# This is a configuration example for the developing monitor-only daemon.
+# Paths and thresholds are examples; adjust them for the target Linux server.
+server:
+  name: web-prod-03
+
+mode: monitor
+
+access_files:
+  - path: /var/log/nginx/site1.access.log
+    site: site1
+    type: nginx
+  - path: /var/log/apache/site2.access.log
+    site: site2
+    type: apache
+
+# Forwarded headers are ignored until the immediate peer matches a trusted CIDR.
+client_ip:
+  header: x-forwarded-for
+  trusted_proxies: []
+
+allowlist: []
+
+trigger:
+  mode: cpu
+  cpu_start: 80
+  cpu_stop: 60
+  start_duration: 10s
+  stop_duration: 60s
+
+analysis:
+  window: 30s
+
+# Rolling counters are held in memory and bounded per active site/IP record.
+aggregation:
+  max_active_records: 2048
+  max_paths_per_ip: 64
+  max_404_paths_per_ip: 64
+  max_user_agents_per_ip: 8
+  max_query_patterns_per_ip: 16
+  max_value_bytes: 256
+
+health:
+  interval: 1s
+
+# Expose the PHP-FPM status page only on loopback; see docs/php-fpm.md.
+php_fpm:
+  enabled: false
+  interval: 5s
+  pools: []
+
+detection:
+  ruleset_version: 1
+  watch_score: 30
+  suspicious_score: 60
+  would_block_score: 80
+  # Optional per-signal weights and named thresholds override code defaults.
+  # Tune only after reviewing monitor-mode incidents and replay results.
+
+database:
+  path: /var/lib/reqsentry/reqsentry.db
+
+maxmind:
+  enabled: false
+  database_dir: /var/lib/reqsentry/maxmind
+  update:
+    enabled: false
+    interval: 24h
+  # To enable updates, set enabled above, account_id, and exactly one of:
+  # license_key_env: REQSENTRY_MAXMIND_LICENSE_KEY
+  # license_key_credential: maxmind-license-key
+
+output:
+  # Create /var/log/reqsentry and grant the service account write access.
+  # New files use mode 0600; see docs/storage-output.md.
+  log:
+    enabled: true
+    path: /var/log/reqsentry/reqsentry.log
+  incidents:
+    enabled: true
+    path: /var/log/reqsentry/incidents.jsonl
+  slack:
+    enabled: false
+    minimum_score: 80
+    cooldown: 10m
+    # To enable Slack, use exactly one of:
+    # webhook_env: REQSENTRY_SLACK_WEBHOOK
+    # webhook_credential: slack-webhook

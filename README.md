@@ -2057,7 +2057,7 @@ The core product philosophy remains:
 
 # 70. Repository Status and Tickets
 
-**Current status:** planning. The full text above is the project brief; there is no runnable ReqSentry daemon in this repository yet. The first release remains monitor-only.
+**Current status:** active V1 implementation. The full text above is the project brief. The Go daemon validates configuration, follows multiple Nginx/Apache access logs, resolves trusted client IPs, keeps bounded rolling counters, samples Linux health, and can poll local PHP-FPM status pages. It produces explainable monitor-only decisions, stores incident history and restart offsets in SQLite, writes JSONL incidents and operational logs, and can enrich incidents from local MaxMind MMDB files. Automatic MaxMind updates, Slack alerts, a Linux service package, and production replay validation remain open.
 
 Implementation work is tracked in the [`Tickets/` backlog](Tickets/README.md):
 
@@ -2066,4 +2066,15 @@ Implementation work is tracked in the [`Tickets/` backlog](Tickets/README.md):
 - Tickets 022–024 cover later ideas, including automatic triggers, historical tuning, and potential Cloudflare enforcement. Enforcement is explicitly outside V1.
 - Completed tickets can move to `Tickets/archive/`, with the index updated to reflect their status.
 
-A useful starting point is [ticket 001: Go daemon skeleton and configuration](Tickets/001-daemon-config.md). Deployment and usage instructions will be added as implementation work lands.
+The current input format is described in [access-log guidance](docs/access-logs.md), optional pool monitoring in [PHP-FPM status guidance](docs/php-fpm.md), persistence and file output in [local history and output](docs/storage-output.md), and optional [local MaxMind enrichment](docs/maxmind.md). The [ticket index](Tickets/README.md) shows completed and remaining work. Deployment and usage instructions will be added as implementation work lands.
+
+## Current development commands
+
+With Go 1.26 or newer installed, the daemon can be checked with:
+
+```sh
+go test ./...
+go run ./cmd/reqsentry -check -config configs/example.yaml
+```
+
+Running without `-check` follows the configured access logs and emits monitor-only incident decisions. The example uses a CPU trigger, so analysis runs when that trigger activates; set `trigger.mode: always` to inspect continuous decisions during development. Configure writable database and output paths before running it. It is not yet validated for production deployment. Remaining work includes [automatic MaxMind updates](Tickets/017-maxmind-updates.md), [Slack alerts](Tickets/018-slack.md), [resource-limit hardening](Tickets/019-degraded-mode.md), and [replay and production validation](Tickets/021-replay-validation.md).
