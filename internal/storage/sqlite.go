@@ -28,6 +28,18 @@ type Store struct {
 	done        chan struct{}
 	mu          sync.Mutex
 	closed      bool
+	opMu        sync.RWMutex
+	operational interface {
+		Operational(string, string, uint64) error
+	}
+}
+
+func (s *Store) SetOperationalSink(sink interface {
+	Operational(string, string, uint64) error
+}) {
+	s.opMu.Lock()
+	s.operational = sink
+	s.opMu.Unlock()
 }
 
 type writeRequest struct {
@@ -164,6 +176,7 @@ func (s *Store) run() {
 	defer close(s.done)
 	batch := make([]model.Incident, 0, 64)
 	var priorError error
+	var consecutive uint64
 	ticker := time.NewTicker(250 * time.Millisecond)
 	defer ticker.Stop()
 	flush := func() error {
@@ -172,8 +185,17 @@ func (s *Store) run() {
 		}
 		err := s.insertBatch(batch)
 		if err != nil {
+			consecutive++
 			priorError = errors.Join(priorError, err)
 			fmt.Fprintf(s.diagnostics, "ReqSentry SQLite incident batch failed count=%d: %v\n", len(batch), err)
+			s.opMu.RLock()
+			sink := s.operational
+			s.opMu.RUnlock()
+			if sink != nil {
+				_ = sink.Operational("sqlite", err.Error(), consecutive)
+			}
+		} else {
+			consecutive = 0
 		}
 		batch = batch[:0]
 		return err

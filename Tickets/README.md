@@ -1,6 +1,6 @@
 # ReqSentry tickets
 
-This is the implementation backlog derived from the project brief. Tickets 001–016 are **Done**; 017–024 are **To do**. IDs indicate a useful implementation sequence, not a promise of strict delivery order. Dependencies are listed in each ticket; work can proceed in parallel when they allow it. Acceptance criteria describe behavior to verify, not implementation mandates beyond the brief.
+This is the implementation backlog derived from the project brief. Tickets 001–020 are **Done**; 021 is **In progress** pending production-log review and sustained Linux validation; 022–024 are **To do** and outside V1. IDs indicate a useful implementation sequence, not a promise of strict delivery order. Dependencies are listed in each ticket; work can proceed in parallel when they allow it. Acceptance criteria describe behavior to verify, not implementation mandates beyond the brief.
 
 ## V1: monitor-only
 

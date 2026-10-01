@@ -44,7 +44,23 @@ func (e *Engine) Evaluate(input Input) model.Incident {
 		RequestTimeSamples: snapshot.RequestTimeSamples, UpstreamTimeSamples: snapshot.UpstreamTimeSamples,
 		StatusFamilies: snapshot.StatusFamilies, StatusCounts: cloneCounts(snapshot.ImportantStatuses),
 		MethodCounts: cloneMethodCounts(snapshot.Methods), UniquePaths: snapshot.UniquePaths,
-		Unique404Paths: snapshot.Unique404Paths,
+		Unique404Paths:   snapshot.Unique404Paths,
+		EvidenceDegraded: snapshot.Saturation.Degraded,
+	}
+	for _, item := range []struct {
+		name       string
+		incomplete bool
+	}{
+		{"paths", snapshot.Saturation.Paths || snapshot.Saturation.Degraded},
+		{"missing_paths", snapshot.Saturation.MissingPaths || snapshot.Saturation.Degraded},
+		{"user_agents", snapshot.Saturation.UserAgents || snapshot.Saturation.Degraded},
+		{"query_patterns", snapshot.Saturation.QueryPatterns || snapshot.Saturation.Degraded},
+		{"query_values", snapshot.Saturation.QueryValues || snapshot.Saturation.Degraded},
+		{"active_records", snapshot.Saturation.RecordLimit},
+	} {
+		if item.incomplete {
+			incident.EvidenceIncomplete = append(incident.EvidenceIncomplete, item.name)
+		}
 	}
 	if snapshot.RequestTimeSamples > 0 {
 		value := float64(snapshot.RequestTimeNanos) / float64(snapshot.RequestTimeSamples) / float64(time.Millisecond)

@@ -2,7 +2,9 @@ package daemon
 
 import (
 	"context"
+	"encoding/json"
 	"log"
+	"runtime"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -33,6 +35,23 @@ type Daemon struct {
 	incidentOutputFailures atomic.Uint64
 	checkpointStore        *storage.Store
 	enricher               *enrichment.Manager
+	operational            interface {
+		Operational(string, string, uint64) error
+	}
+	maxMindStatus string
+	slackStatus   string
+}
+
+type Status struct {
+	UpdatedAt     time.Time             `json:"updated_at"`
+	Running       bool                  `json:"running"`
+	TriggerActive bool                  `json:"trigger_active"`
+	Health        serverhealth.Snapshot `json:"health"`
+	WatchedLogs   []watcher.Status      `json:"watched_logs"`
+	Aggregation   aggregator.Metrics    `json:"aggregation"`
+	SQLite        string                `json:"sqlite"`
+	MaxMind       string                `json:"maxmind"`
+	Slack         string                `json:"slack"`
 }
 
 func New(cfg config.Config, logger *log.Logger) *Daemon {
@@ -80,6 +99,25 @@ func (d *Daemon) SetEnricher(manager *enrichment.Manager) {
 	d.enricher = manager
 }
 
+func (d *Daemon) SetIntegrationStatus(maxmind, slack string) {
+	d.maxMindStatus = maxmind
+	d.slackStatus = slack
+}
+
+func (d *Daemon) SetOperationalSink(sink interface {
+	Operational(string, string, uint64) error
+}) {
+	d.operational = sink
+}
+
+func (d *Daemon) alert(kind, detail string, failures uint64) {
+	if d.operational != nil {
+		if err := d.operational.Operational(kind, detail, failures); err != nil {
+			d.logger.Printf("operational alert queue failed: %v", err)
+		}
+	}
+}
+
 // Run ingests access logs and produces monitor-only incident decisions.
 func (d *Daemon) Run(ctx context.Context) error {
 	d.logger.Printf("ReqSentry starting server=%s mode=%s logs=%d", d.config.Server.Name, d.config.Mode, len(d.config.AccessFiles))
@@ -102,9 +140,71 @@ func (d *Daemon) Run(ctx context.Context) error {
 		}
 		rollup.Observe(resolved, excluded, time.Now())
 	})
+	watchDone := make(chan struct{})
+	go func() {
+		defer close(watchDone)
+		ticker := time.NewTicker(10 * time.Second)
+		defer ticker.Stop()
+		consecutive := make(map[string]uint64)
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+				for _, status := range manager.Status() {
+					if status.LastError != "" {
+						consecutive[status.Path]++
+						d.alert("input:"+status.Site, status.LastError, consecutive[status.Path])
+					} else {
+						consecutive[status.Path] = 0
+					}
+				}
+			}
+		}
+	}()
 	if d.checkpointStore != nil {
 		manager.SetCheckpointStore(d.checkpointStore)
 	}
+	statusDone := make(chan struct{})
+	go func() {
+		defer close(statusDone)
+		ticker := time.NewTicker(10 * time.Second)
+		defer ticker.Stop()
+		write := func(running bool) {
+			if d.checkpointStore == nil {
+				return
+			}
+			health, _ := d.Health()
+			maxmindStatus := d.maxMindStatus
+			if d.enricher != nil && d.enricher.Available() {
+				maxmindStatus = "available"
+			}
+			if maxmindStatus == "" {
+				maxmindStatus = "disabled"
+			}
+			slackStatus := d.slackStatus
+			if slackStatus == "" {
+				slackStatus = "disabled"
+			}
+			status := Status{UpdatedAt: time.Now().UTC(), Running: running, TriggerActive: d.trigger.Active(), Health: health, WatchedLogs: manager.Status(), Aggregation: rollup.Metrics(), SQLite: "available", MaxMind: maxmindStatus, Slack: slackStatus}
+			payload, _ := json.Marshal(status)
+			writeCtx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+			defer cancel()
+			if err := d.checkpointStore.SetState(writeCtx, "daemon.status", string(payload)); err != nil {
+				d.logger.Printf("daemon status update failed: %v", err)
+			}
+		}
+		write(true)
+		for {
+			select {
+			case <-ctx.Done():
+				write(false)
+				return
+			case <-ticker.C:
+				write(true)
+			}
+		}
+	}()
 	pruneDone := make(chan struct{})
 	go func() {
 		defer close(pruneDone)
@@ -116,6 +216,18 @@ func (d *Daemon) Run(ctx context.Context) error {
 				return
 			case now := <-ticker.C:
 				rollup.Prune(now)
+				var memory runtime.MemStats
+				runtime.ReadMemStats(&memory)
+				degraded := rollup.Metrics().Degraded
+				if !degraded && d.config.Aggregation.DegradeAtBytes > 0 && int64(memory.HeapAlloc) >= d.config.Aggregation.DegradeAtBytes {
+					if rollup.SetDegraded(true) {
+						d.logger.Printf("aggregation degraded heap_bytes=%d threshold=%d", memory.HeapAlloc, d.config.Aggregation.DegradeAtBytes)
+					}
+				} else if degraded && int64(memory.HeapAlloc) <= d.config.Aggregation.RecoverBelowBytes {
+					if rollup.SetDegraded(false) {
+						d.logger.Printf("aggregation recovered heap_bytes=%d threshold=%d", memory.HeapAlloc, d.config.Aggregation.RecoverBelowBytes)
+					}
+				}
 			}
 		}
 	}()
@@ -161,6 +273,8 @@ func (d *Daemon) Run(ctx context.Context) error {
 	<-healthDone
 	<-analysisDone
 	<-phpDone
+	<-watchDone
+	<-statusDone
 	metrics := rollup.Metrics()
 	d.logger.Printf("ReqSentry stopped parsed_requests=%d allowlisted_requests=%d active_records=%d dropped_events=%d", parsed.Load(), allowlisted.Load(), metrics.ActiveRecords, metrics.DroppedEvents)
 	return nil
@@ -179,6 +293,7 @@ func (d *Daemon) monitorPHPFPM(ctx context.Context) {
 				if count&(count-1) == 0 {
 					d.logger.Printf("PHP-FPM status unavailable pool=%s failures=%d: %s", state.Name, count, state.LastError)
 				}
+				d.alert("php_fpm:"+state.Name, state.LastError, count)
 			} else if failures[state.Name] > 0 {
 				d.logger.Printf("PHP-FPM status recovered pool=%s", state.Name)
 				failures[state.Name] = 0
@@ -210,6 +325,7 @@ func (d *Daemon) monitorHealth(ctx context.Context, analysisWake chan<- struct{}
 			if failures&(failures-1) == 0 {
 				d.logger.Printf("server health unavailable failures=%d: %v", failures, err)
 			}
+			d.alert("server_health", err.Error(), failures)
 		} else if failures > 0 {
 			d.logger.Print("server health sampling recovered")
 			failures = 0
@@ -321,6 +437,7 @@ func (d *Daemon) analyzeOnce(rollup *aggregator.Aggregator, scorer *scoring.Engi
 				if failures&(failures-1) == 0 {
 					d.logger.Printf("incident output failed failures=%d: %v", failures, err)
 				}
+				d.alert("incident_output", err.Error(), failures)
 			}
 		}
 		codes := make([]string, 0, len(incident.Signals))

@@ -1,5 +1,7 @@
 # ReqSentry
-
+<p align="center">
+  <img src="logo.png" alt="ReqSentry" width="900">
+</p>
 ## 1. Project Overview
 
 ReqSentry is a lightweight Linux daemon for detecting abusive, automated, or abnormal web traffic.
@@ -2057,24 +2059,24 @@ The core product philosophy remains:
 
 # 70. Repository Status and Tickets
 
-**Current status:** active V1 implementation. The full text above is the project brief. The Go daemon validates configuration, follows multiple Nginx/Apache access logs, resolves trusted client IPs, keeps bounded rolling counters, samples Linux health, and can poll local PHP-FPM status pages. It produces explainable monitor-only decisions, stores incident history and restart offsets in SQLite, writes JSONL incidents and operational logs, and can enrich incidents from local MaxMind MMDB files. Automatic MaxMind updates, Slack alerts, a Linux service package, and production replay validation remain open.
+**Current status:** V1 implementation is substantially complete; production validation remains open. The full text above is the original project brief. The Go daemon follows multiple Nginx/Apache access logs, resolves trusted client IPs, keeps bounded rolling counters with a degraded mode, samples Linux health, and can poll local PHP-FPM status pages. It produces explainable monitor-only decisions, stores incident history and restart offsets in SQLite, writes JSONL incidents and operational logs, enriches incidents from local MaxMind MMDB files, schedules authenticated MMDB updates, and optionally sends Slack alerts. A Linux systemd unit, operator CLI, and historical replay are included. No V1 component changes web traffic or blocks clients.
 
 Implementation work is tracked in the [`Tickets/` backlog](Tickets/README.md):
 
 - [Tickets/README.md](Tickets/README.md) indexes all 24 tickets in a suggested sequence, with dependencies.
-- Tickets 001–021 cover V1, from the Go daemon and log ingestion through detection, outputs, operational safety, and validation. Each ticket lists acceptance criteria.
+- Tickets 001–020 are implemented. Ticket 021 includes replay, synthetic tests, and local benchmarks, with a representative production-log false-positive review and sustained Linux host measurements still pending. Each ticket lists acceptance criteria.
 - Tickets 022–024 cover later ideas, including automatic triggers, historical tuning, and potential Cloudflare enforcement. Enforcement is explicitly outside V1.
-- Completed tickets can move to `Tickets/archive/`, with the index updated to reflect their status.
+- Ticket status is kept in each ticket and summarized in the index.
 
-The current input format is described in [access-log guidance](docs/access-logs.md), optional pool monitoring in [PHP-FPM status guidance](docs/php-fpm.md), persistence and file output in [local history and output](docs/storage-output.md), and optional [local MaxMind enrichment](docs/maxmind.md). The [ticket index](Tickets/README.md) shows completed and remaining work. Deployment and usage instructions will be added as implementation work lands.
+Use the [Linux installation and operations guide](docs/install.md) for binary installation, least-privilege log access, systemd setup, and CLI commands. The [access-log guide](docs/access-logs.md) describes supported formats and optional fields; [PHP-FPM guidance](docs/php-fpm.md), [local history and output](docs/storage-output.md), and [MaxMind enrichment and updates](docs/maxmind.md) cover integrations. [Replay and validation](docs/validation.md) records synthetic coverage, local measurements, and the remaining production review.
 
 ## Current development commands
 
-With Go 1.26 or newer installed, the daemon can be checked with:
+With Go 1.26 or newer installed, check the project and configuration with:
 
 ```sh
 go test ./...
-go run ./cmd/reqsentry -check -config configs/example.yaml
+go run ./cmd/reqsentry -config configs/example.yaml config test
 ```
 
-Running without `-check` follows the configured access logs and emits monitor-only incident decisions. The example uses a CPU trigger, so analysis runs when that trigger activates; set `trigger.mode: always` to inspect continuous decisions during development. Configure writable database and output paths before running it. It is not yet validated for production deployment. Remaining work includes [automatic MaxMind updates](Tickets/017-maxmind-updates.md), [Slack alerts](Tickets/018-slack.md), [resource-limit hardening](Tickets/019-degraded-mode.md), and [replay and production validation](Tickets/021-replay-validation.md).
+Run `go run ./cmd/reqsentry -config /absolute/path/config.yaml` to start the monitor; the sample config's `/var/...` paths need adaptation to the host. The example uses a CPU trigger, so analysis starts when that trigger activates; set `trigger.mode: always` to inspect continuous decisions during development. `status`, `report`, `maxmind status`, and `maxmind update` are local operator commands after `-config PATH`. Use `replay LOG...` for historical combined-format logs; it emits incident JSON lines and a summary without network integrations. The service is not yet validated for production deployment because [ticket 021](Tickets/021-replay-validation.md) still requires representative log review and sustained measurements on the target Linux server.

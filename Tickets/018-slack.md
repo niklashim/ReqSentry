@@ -1,6 +1,7 @@
 # 018 — Slack incident and operational alerts
 
-**Status:** To do  
+**Status:** Done
+
 **Milestone:** V1  
 **Depends on:** 013, 015  
 **Brief:** §§44–47, 58, 67
@@ -14,3 +15,5 @@ Send optional, concise alerts for high-confidence incidents and repeated operati
 - Per-incident/IP cooldown and active-incident deduplication suppress one alert per analysis window; a later distinct incident may alert again.
 - Webhook secrets come from environment/systemd credentials; timeouts and failures never block log ingestion.
 - Repeated failures in inputs, SQLite, PHP-FPM, or MaxMind can emit controlled operational alerts without a flood from transient errors.
+
+Implemented with a bounded asynchronous Slack output, incident deduplication and cooldown, a recurring-failure threshold, and callbacks from input, SQLite, PHP-FPM, and MaxMind monitoring.

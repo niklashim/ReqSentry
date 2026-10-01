@@ -1,4 +1,4 @@
-# This is a configuration example for the developing monitor-only daemon.
+# Configuration example for the monitor-only daemon.
 # Paths and thresholds are examples; adjust them for the target Linux server.
 server:
   name: web-prod-03
@@ -38,6 +38,8 @@ aggregation:
   max_user_agents_per_ip: 8
   max_query_patterns_per_ip: 16
   max_value_bytes: 256
+  degrade_at_bytes: 268435456
+  recover_below_bytes: 201326592
 
 health:
   interval: 1s
@@ -61,6 +63,7 @@ database:
 
 maxmind:
   enabled: false
+  edition: GeoIP2-Enterprise
   database_dir: /var/lib/reqsentry/maxmind
   update:
     enabled: false

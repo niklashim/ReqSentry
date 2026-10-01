@@ -1,6 +1,7 @@
 # 021 — Replay and production validation
 
-**Status:** To do  
+**Status:** In progress
+
 **Milestone:** V1  
 **Depends on:** 003–020  
 **Brief:** §§56, 63, 68–69
@@ -14,3 +15,5 @@ Feed historical access logs through the normal parser, aggregator, and detector,
 - End-to-end checks cover rotation, restart, proxy identity, IPv6, unavailable PHP-FPM/MaxMind/Slack, and persistent MaxMind retry state.
 - Benchmarks report CPU, memory, ingestion lag, and dropped/coalesced data at normal and attack-scale loads; any limits are documented.
 - A monitor-mode review records false positives and threshold changes before considering future enforcement.
+
+Replay, synthetic coverage, and local benchmarks are implemented; see [validation results](../docs/validation.md). A representative production-log review and sustained Linux host measurements remain pending, so this ticket is not marked Done.

@@ -1,6 +1,6 @@
 # Local history and output
 
-ReqSentry stores monitor-mode incidents in the configured SQLite database. It uses WAL mode and batches up to 64 incidents or 250 ms of queued work per transaction. Each incident retains its JSON evidence, score, decision, ruleset version, time window, optional health/enrichment, and canonical site/IP identity. System state is available for later integrations. Normal requests stay in bounded memory; the database stores selected traffic windows only for incidents.
+ReqSentry stores monitor-mode incidents in the configured SQLite database. It uses WAL mode and batches up to 64 incidents or 250 ms of queued work per transaction. Each incident retains its JSON evidence, score, decision, ruleset version, time window, optional health/enrichment, and canonical site/IP identity. System state also stores the daemon status heartbeat and MaxMind update schedule. Normal requests stay in bounded memory; the database stores selected traffic windows only for incidents.
 
 There is currently **no automatic incident retention or pruning**. Plan disk capacity and archive or prune old records during a maintenance window. Do not remove SQLite `-wal` or `-shm` files while ReqSentry is running. The database file is created with mode `0600`; its parent directory is created with mode `0700` if absent. Give the service account access to its configured database directory.
 

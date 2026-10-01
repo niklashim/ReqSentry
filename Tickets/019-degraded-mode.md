@@ -1,6 +1,7 @@
 # 019 — Resource limits and degraded mode
 
-**Status:** To do  
+**Status:** Done
+
 **Milestone:** V1  
 **Depends on:** 006, 013  
 **Brief:** §§53–55, 63, 68
@@ -14,3 +15,5 @@ Protect the web server from monitoring overhead during very large or adversarial
 - Saturated or degraded evidence is labeled so the scorer cannot present incomplete counts as exact counts.
 - Recovery is controlled and observable; overloaded output or database queues cannot grow without bound.
 - Stress tests show bounded growth and continued ingestion at traffic levels well above normal load.
+
+The aggregator now enters and recovers from memory-triggered degraded mode with hysteresis, labels incomplete evidence, and retains basic counters. A 20,000-request stress test verifies continued ingestion and recovery.

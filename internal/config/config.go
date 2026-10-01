@@ -116,12 +116,14 @@ type AnalysisConfig struct {
 }
 
 type AggregationConfig struct {
-	MaxActiveRecords   int `yaml:"max_active_records"`
-	MaxPathsPerIP      int `yaml:"max_paths_per_ip"`
-	Max404PathsPerIP   int `yaml:"max_404_paths_per_ip"`
-	MaxUserAgentsPerIP int `yaml:"max_user_agents_per_ip"`
-	MaxQueriesPerIP    int `yaml:"max_query_patterns_per_ip"`
-	MaxValueBytes      int `yaml:"max_value_bytes"`
+	MaxActiveRecords   int   `yaml:"max_active_records"`
+	MaxPathsPerIP      int   `yaml:"max_paths_per_ip"`
+	Max404PathsPerIP   int   `yaml:"max_404_paths_per_ip"`
+	MaxUserAgentsPerIP int   `yaml:"max_user_agents_per_ip"`
+	MaxQueriesPerIP    int   `yaml:"max_query_patterns_per_ip"`
+	MaxValueBytes      int   `yaml:"max_value_bytes"`
+	DegradeAtBytes     int64 `yaml:"degrade_at_bytes"`
+	RecoverBelowBytes  int64 `yaml:"recover_below_bytes"`
 }
 
 type HealthConfig struct {
@@ -145,6 +147,7 @@ type DatabaseConfig struct {
 
 type MaxMindConfig struct {
 	Enabled              bool                `yaml:"enabled"`
+	Edition              string              `yaml:"edition"`
 	AccountID            string              `yaml:"account_id"`
 	LicenseKeyEnv        string              `yaml:"license_key_env"`
 	LicenseKeyCredential string              `yaml:"license_key_credential"`
@@ -303,6 +306,15 @@ func (c *Config) Validate() error {
 			return fmt.Errorf("aggregation.%s must be positive", setting.name)
 		}
 	}
+	if c.Aggregation.DegradeAtBytes == 0 {
+		c.Aggregation.DegradeAtBytes = 256 << 20
+	}
+	if c.Aggregation.RecoverBelowBytes == 0 {
+		c.Aggregation.RecoverBelowBytes = 192 << 20
+	}
+	if c.Aggregation.DegradeAtBytes < 1<<20 || c.Aggregation.RecoverBelowBytes < 1<<20 || c.Aggregation.RecoverBelowBytes >= c.Aggregation.DegradeAtBytes {
+		return errors.New("aggregation memory thresholds require 1 MiB <= recover_below_bytes < degrade_at_bytes")
+	}
 	if c.Health.Interval.Duration == 0 {
 		c.Health.Interval.Duration = time.Second
 	}
@@ -350,6 +362,14 @@ func (c *Config) Validate() error {
 		}
 		if c.MaxMind.AccountID == "" {
 			return errors.New("maxmind.account_id is required for updates")
+		}
+		if c.MaxMind.Edition == "" {
+			c.MaxMind.Edition = "GeoIP2-Enterprise"
+		}
+		switch c.MaxMind.Edition {
+		case "GeoIP2-Enterprise", "GeoIP2-ISP", "GeoLite2-ASN", "GeoIP2-City", "GeoLite2-City", "GeoIP2-Country", "GeoLite2-Country":
+		default:
+			return errors.New("maxmind.edition is not a supported MMDB edition")
 		}
 		if err := validateSecretRef("maxmind license key", c.MaxMind.LicenseKeyEnv, c.MaxMind.LicenseKeyCredential); err != nil {
 			return err

@@ -23,7 +23,7 @@ func ImpactWithRules(global aggregator.Snapshot, allRequests uint64, siteCount i
 		return signals
 	}
 	notFound := global.ImportantStatuses[404]
-	if float64(siteCount) >= t["cross_site_min_sites"] && float64(global.Requests) >= t["cross_site_min_requests"] && float64(notFound) >= t["cross_site_min_404_count"] && ratio(notFound, global.Requests) >= t["cross_site_404_ratio"] && float64(global.Unique404Paths) >= t["cross_site_min_unique404"] {
+	if !global.Saturation.Degraded && float64(siteCount) >= t["cross_site_min_sites"] && float64(global.Requests) >= t["cross_site_min_requests"] && float64(notFound) >= t["cross_site_min_404_count"] && ratio(notFound, global.Requests) >= t["cross_site_404_ratio"] && float64(global.Unique404Paths) >= t["cross_site_min_unique404"] {
 		signals = append(signals, signal("CROSS_SITE_SCAN", model.SignalBehavioral, map[string]any{
 			"sites": siteCount, "requests": global.Requests, "status_404": notFound,
 		}))
@@ -59,6 +59,11 @@ func ImpactWithRules(global aggregator.Snapshot, allRequests uint64, siteCount i
 				"average_request_ms": float64(averageNanos) / float64(time.Millisecond),
 				"timed_requests":     global.RequestTimeSamples, "traffic_share": share,
 			}))
+		}
+	}
+	if global.Saturation.Degraded {
+		for i := range signals {
+			signals[i].Evidence["degraded"] = true
 		}
 	}
 	return signals

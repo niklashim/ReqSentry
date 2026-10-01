@@ -82,6 +82,8 @@ type Incident struct {
 	MethodCounts         map[string]uint64 `json:"method_counts"`
 	UniquePaths          int               `json:"unique_paths"`
 	Unique404Paths       int               `json:"unique_404_paths"`
+	EvidenceDegraded     bool              `json:"evidence_degraded"`
+	EvidenceIncomplete   []string          `json:"evidence_incomplete,omitempty"`
 	TrafficShare         *float64          `json:"traffic_share,omitempty"`
 	TrafficShareCoverage string            `json:"traffic_share_coverage,omitempty"`
 	HealthSampledAt      *time.Time        `json:"health_sampled_at,omitempty"`

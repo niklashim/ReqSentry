@@ -139,6 +139,12 @@ func (m *Manager) Lookup(ip netip.Addr) (Result, error) {
 	return result, nil
 }
 
+func (m *Manager) Available() bool {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	return len(m.readers) > 0
+}
+
 func (m *Manager) Close() error {
 	m.mu.Lock()
 	defer m.mu.Unlock()

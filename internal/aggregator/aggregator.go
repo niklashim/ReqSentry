@@ -30,6 +30,7 @@ type Saturation struct {
 	QueryPatterns bool
 	QueryValues   bool
 	RecordLimit   bool
+	Degraded      bool
 }
 
 type Snapshot struct {
@@ -73,6 +74,7 @@ type Metrics struct {
 	ActiveRecords uint64
 	DroppedEvents uint64
 	OldEvents     uint64
+	Degraded      bool
 }
 
 type Identity struct {
@@ -90,6 +92,7 @@ type Aggregator struct {
 	lastPrune int64
 	dropped   uint64
 	oldEvents uint64
+	degraded  bool
 }
 
 type totalBucket struct {
@@ -205,7 +208,7 @@ func (a *Aggregator) Observe(event model.RequestEvent, allowlisted bool, at time
 			}
 			a.records[id] = rec
 		}
-		rec.add(event, second, a.limits)
+		rec.add(event, second, a.limits, a.degraded)
 	}
 	return true
 }
@@ -288,6 +291,7 @@ func (a *Aggregator) Snapshot(site string, ip netip.Addr, window time.Duration, 
 		result.Saturation.UserAgents = result.Saturation.UserAgents || b.saturation.UserAgents
 		result.Saturation.QueryPatterns = result.Saturation.QueryPatterns || b.saturation.QueryPatterns
 		result.Saturation.QueryValues = result.Saturation.QueryValues || b.saturation.QueryValues
+		result.Saturation.Degraded = result.Saturation.Degraded || b.saturation.Degraded
 	}
 	result.UniquePaths = len(paths)
 	result.Unique404Paths = len(missing)
@@ -387,7 +391,17 @@ func (a *Aggregator) ActiveIdentities(window time.Duration, at time.Time) []Iden
 func (a *Aggregator) Metrics() Metrics {
 	a.mu.Lock()
 	defer a.mu.Unlock()
-	return Metrics{ActiveRecords: uint64(len(a.records)), DroppedEvents: a.dropped, OldEvents: a.oldEvents}
+	return Metrics{ActiveRecords: uint64(len(a.records)), DroppedEvents: a.dropped, OldEvents: a.oldEvents, Degraded: a.degraded}
+}
+
+func (a *Aggregator) SetDegraded(value bool) bool {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if a.degraded == value {
+		return false
+	}
+	a.degraded = value
+	return true
 }
 
 // Prune releases client records after their 60-second window expires even when
@@ -406,14 +420,7 @@ func (a *Aggregator) prune(second int64) {
 	}
 }
 
-func (r *record) add(event model.RequestEvent, second int64, limits config.AggregationConfig) {
-	path := CanonicalPath(event.Path)
-	followKey := path
-	if event.Query != "" {
-		if values, err := url.ParseQuery(event.Query); err == nil {
-			followKey += "?" + values.Encode()
-		}
-	}
+func (r *record) add(event model.RequestEvent, second int64, limits config.AggregationConfig, degraded bool) {
 	if second > r.lastExpired {
 		r.expireBefore(second - (bucketCount - 1))
 		r.lastExpired = second
@@ -433,21 +440,10 @@ func (r *record) add(event model.RequestEvent, second int64, limits config.Aggre
 		*b = bucket{second: second, used: true, statuses: make(map[int]uint64), methods: make(map[string]uint64), method404: make(map[string]uint64), uaCounts: make(map[string]uint64)}
 	}
 	b.requests++
-	if _, found := r.pendingRedirects[followKey]; found {
-		b.redirectFollows++
-		delete(r.pendingRedirects, followKey)
-	} else if _, found := r.pendingRedirects[path]; found {
-		b.redirectFollows++
-		delete(r.pendingRedirects, path)
+	if degraded {
+		b.saturation.Degraded = true
 	}
-	if (event.Status == 301 || event.Status == 302) && event.Location != nil {
-		if target := redirectTarget(*event.Location, event.Host, limits.MaxValueBytes); target != "" {
-			b.redirectKnown++
-			if _, found := r.pendingRedirects[target]; found || len(r.pendingRedirects) < limits.MaxPathsPerIP {
-				r.pendingRedirects[target] = second
-			}
-		}
-	}
+	// Basic counters remain exact when rich tracking is suspended.
 	b.statusFamilies[event.Status/100]++
 	switch event.Status {
 	case 301, 302, 403, 404:
@@ -475,6 +471,31 @@ func (r *record) add(event model.RequestEvent, second int64, limits config.Aggre
 	if event.UpstreamTime != nil && *event.UpstreamTime >= 0 {
 		b.upstreamNanos = saturatingAdd(b.upstreamNanos, uint64(*event.UpstreamTime))
 		b.upstreamSamples++
+	}
+	if degraded {
+		return
+	}
+	path := CanonicalPath(event.Path)
+	followKey := path
+	if event.Query != "" {
+		if values, err := url.ParseQuery(event.Query); err == nil {
+			followKey += "?" + values.Encode()
+		}
+	}
+	if _, found := r.pendingRedirects[followKey]; found {
+		b.redirectFollows++
+		delete(r.pendingRedirects, followKey)
+	} else if _, found := r.pendingRedirects[path]; found {
+		b.redirectFollows++
+		delete(r.pendingRedirects, path)
+	}
+	if (event.Status == 301 || event.Status == 302) && event.Location != nil {
+		if target := redirectTarget(*event.Location, event.Host, limits.MaxValueBytes); target != "" {
+			b.redirectKnown++
+			if _, found := r.pendingRedirects[target]; found || len(r.pendingRedirects) < limits.MaxPathsPerIP {
+				r.pendingRedirects[target] = second
+			}
+		}
 	}
 	addBounded(path, &b.paths, r.paths, limits.MaxPathsPerIP, limits.MaxValueBytes, &b.saturation.Paths)
 	if event.Status == 404 {

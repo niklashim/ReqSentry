@@ -5,6 +5,8 @@ import (
 	"context"
 	"log"
 	"net/netip"
+	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"testing"
@@ -15,6 +17,7 @@ import (
 	"github.com/niklashim/ReqSentry/internal/enrichment"
 	"github.com/niklashim/ReqSentry/internal/model"
 	"github.com/niklashim/ReqSentry/internal/scoring"
+	"github.com/niklashim/ReqSentry/internal/storage"
 )
 
 func TestRunStopsOnCancellation(t *testing.T) {
@@ -34,6 +37,57 @@ func TestRunStopsOnCancellation(t *testing.T) {
 	}
 	if !strings.Contains(output.String(), "monitor mode") || !strings.Contains(output.String(), "stopped") {
 		t.Fatalf("lifecycle logs missing: %s", output.String())
+	}
+}
+
+func TestStartRestartStopWithAccessLog(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "site.log")
+	if err := os.WriteFile(path, nil, 0600); err != nil {
+		t.Fatal(err)
+	}
+	cfg := config.Config{Server: config.ServerConfig{Name: "smoke"}, Mode: "monitor", AccessFiles: []config.AccessFile{{Path: path, Site: "site"}}, Database: config.DatabaseConfig{Path: filepath.Join(dir, "state.db")}}
+	if err := cfg.Validate(); err != nil {
+		t.Fatal(err)
+	}
+	store, err := storage.Open(cfg.Database.Path, &bytes.Buffer{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	for runNumber := 0; runNumber < 2; runNumber++ {
+		var logs bytes.Buffer
+		service := New(cfg, log.New(&logs, "", 0))
+		service.SetCheckpointStore(store)
+		service.SetIncidentSink(store)
+		ctx, cancel := context.WithCancel(context.Background())
+		done := make(chan error, 1)
+		go func() { done <- service.Run(ctx) }()
+		time.Sleep(350 * time.Millisecond)
+		file, err := os.OpenFile(path, os.O_APPEND|os.O_WRONLY, 0600)
+		if err != nil {
+			t.Fatal(err)
+		}
+		_, err = file.WriteString("192.0.2.1 - - [01/Oct/2026:12:00:00 +0000] \"GET / HTTP/1.1\" 200 12 \"-\" \"Mozilla\"\n")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := file.Close(); err != nil {
+			t.Fatal(err)
+		}
+		time.Sleep(350 * time.Millisecond)
+		cancel()
+		select {
+		case err := <-done:
+			if err != nil {
+				t.Fatal(err)
+			}
+		case <-time.After(3 * time.Second):
+			t.Fatal("daemon did not stop")
+		}
+		if !strings.Contains(logs.String(), "parsed_requests=1") {
+			t.Fatalf("run %d did not ingest exactly one new line: %s", runNumber, logs.String())
+		}
 	}
 }
 

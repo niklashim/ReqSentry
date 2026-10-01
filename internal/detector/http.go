@@ -125,6 +125,18 @@ func HTTPWithRules(snapshot aggregator.Snapshot, rules config.DetectionConfig) [
 			break
 		}
 	}
+	if snapshot.Saturation.Degraded {
+		filtered := signals[:0]
+		for _, item := range signals {
+			switch item.Code {
+			case "HIGH_404_DIVERSITY", "PATH_ENUMERATION", "QUERY_ENUMERATION", "METHOD_404_SCAN", "USER_AGENT_ROTATION", "AUTOMATED_USER_AGENT":
+				continue
+			}
+			item.Evidence["degraded"] = true
+			filtered = append(filtered, item)
+		}
+		return filtered
+	}
 	return signals
 }
 

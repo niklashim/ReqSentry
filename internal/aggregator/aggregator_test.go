@@ -110,6 +110,36 @@ func TestCapsSaturationAndExpiry(t *testing.T) {
 	}
 }
 
+func TestDegradedModeKeepsBasicCountersUnderLoad(t *testing.T) {
+	rollup := New(limits())
+	now := time.Unix(1_800_000_000, 0)
+	if !rollup.SetDegraded(true) {
+		t.Fatal("failed to enter degraded mode")
+	}
+	for i := 0; i < 20000; i++ {
+		event := request("one", "192.0.2.1", "/dynamic/long/path", 404)
+		event.Query = strings.Repeat("q", 4096)
+		if !rollup.Observe(event, false, now) {
+			t.Fatalf("request %d dropped", i)
+		}
+	}
+	snapshot, ok := rollup.Snapshot("one", netip.MustParseAddr("192.0.2.1"), time.Second, now)
+	if !ok || snapshot.Requests != 20000 || snapshot.ImportantStatuses[404] != 20000 || snapshot.Methods["GET"] != 20000 || !snapshot.Saturation.Degraded {
+		t.Fatalf("basic counters: %+v", snapshot)
+	}
+	if snapshot.UniquePaths != 0 || snapshot.QueryPatterns != 0 || rollup.Metrics().ActiveRecords != 2 {
+		t.Fatalf("rich tracking continued: %+v metrics=%+v", snapshot, rollup.Metrics())
+	}
+	if !rollup.SetDegraded(false) {
+		t.Fatal("failed to recover")
+	}
+	rollup.Observe(request("one", "192.0.2.1", "/after", 200), false, now.Add(time.Second))
+	recovered, _ := rollup.Snapshot("one", netip.MustParseAddr("192.0.2.1"), time.Second, now.Add(time.Second))
+	if recovered.Saturation.Degraded || recovered.UniquePaths != 1 {
+		t.Fatalf("recovery: %+v", recovered)
+	}
+}
+
 func TestExpiredPathCapacityIsReusedForActiveIP(t *testing.T) {
 	rollup := New(limits())
 	start := time.Unix(1_800_000_000, 0)

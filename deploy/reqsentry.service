@@ -1,0 +1,30 @@
+[Unit]
+Description=ReqSentry monitor-only access log analysis
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=reqsentry
+Group=reqsentry
+StateDirectory=reqsentry
+LogsDirectory=reqsentry
+ExecStartPre=/usr/local/bin/reqsentry -config /etc/reqsentry/config.yaml config test
+ExecStart=/usr/local/bin/reqsentry -config /etc/reqsentry/config.yaml
+Restart=on-failure
+RestartSec=5s
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+ReadWritePaths=/var/lib/reqsentry /var/log/reqsentry
+CapabilityBoundingSet=
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+
+# When optional integrations are enabled, use root-owned secret files and
+# systemd credentials. The YAML then references only the credential names.
+# LoadCredential=maxmind-license-key:/etc/reqsentry/maxmind-license-key
+# LoadCredential=slack-webhook:/etc/reqsentry/slack-webhook
+
+[Install]
+WantedBy=multi-user.target
