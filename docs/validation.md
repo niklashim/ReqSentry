@@ -1,6 +1,6 @@
 # Replay and V1 validation
 
-ReqSentry can replay historical combined, JSON, and logfmt access logs plus configured error sources through the live parser, trusted-proxy resolution, rolling aggregator, HTTP and impact rules, and scoring engine. Replay makes no HTTP requests, sends no Slack/Teams/SNS alerts, and takes no enforcement action. It emits one JSON incident per line and a final summary containing parsed, malformed, allowlisted, dropped, error, incident, and per-source availability counts.
+ReqSentry can replay historical combined, JSON, and logfmt access logs plus configured error sources through the live parser, trusted-proxy resolution, rolling aggregator, HTTP and impact rules, and scoring engine. Replay makes no HTTP requests, sends no Slack/Teams/SNS alerts, and takes no enforcement action. By default it emits readable findings and a summary; with `-json` it emits one JSON incident per line and a final summary containing parsed, malformed, allowlisted, dropped, error, incident, and per-source availability counts.
 
 ## Synthetic coverage
 
@@ -30,7 +30,7 @@ go test -race ./...
 
 ## Product enhancement validation
 
-Tickets [055–067](../Tickets/README.md#product-improvements) were implemented and checked on 3 October 2026. The full Go race-checked suite, static checks, JavaScript syntax check, example configuration validation, Linux arm64 build, and Nginx configuration syntax check pass. The existing development container was used only for Nginx validation and was not reloaded.
+Product improvements 055–067 were implemented and checked on 3 October 2026. The full Go race-checked suite, static checks, JavaScript syntax check, example configuration validation, Linux arm64 build, and Nginx configuration syntax check pass. The existing development container was used only for Nginx validation and was not reloaded.
 
 Feature checks cover independent notification routing/failures, cooldowns, queue overflow/expiry, retry exhaustion and stable IDs, Teams Adaptive Card/throttling contracts, SNS JSON/attributes/payload budgets, permanent failures, stack-trace privacy, and secret redaction. Provider tests use fake transports; no live Teams or AWS message was sent. Use the [notification setup guide](notifications.md) for a controlled workflow/topic/subscriber smoke test before relying on an installation.
 
@@ -54,11 +54,11 @@ go test -race ./...
 
 Retention tests verify read-only affected-count/range preview, cutoff boundaries, background minute cleanup, immutable incident snapshots, preserved system state, and disk diagnostics. Recovery tests retain complete-line overlap, reject excessive bytes and backward timestamps before emitting decisions, preserve partial trailing records, and suppress repeated SQLite incident IDs. A subprocess is killed and restarted twice across an unfinished 300-request window; the recovered count remains 300. Rotation/copy-truncation gaps and possible remote/JSONL duplicates remain documented in [storage guidance](storage-output.md).
 
-Browser verification covered overview filters, three distinct request-associated samples sharing a timestamp/message, related incident links, immutable detail with a weaker site/time backend error, redacted messages, and horizontal sample-table scrolling on a narrow screen. This complements API bounds and escaping tests. Sustained concurrent access/error/dashboard load and peak RSS still need measurement on the intended Linux host under ticket 021.
+Browser verification covered overview filters, three distinct request-associated samples sharing a timestamp/message, related incident links, immutable detail with a weaker site/time backend error, redacted messages, and horizontal sample-table scrolling on a narrow screen. This complements API bounds and escaping tests. Sustained concurrent access/error/dashboard load and peak RSS still need measurement on the intended Linux host in the production validation checklist.
 
 ## Incident sample and retention validation
 
-Tickets [068–069](../Tickets/README.md#product-improvements) were implemented on 3 October 2026. The full `go test -race ./...` suite, `go vet ./...`, JavaScript syntax check, the configuration examples available at that time, and native/Linux arm64 builds pass. No existing development container or production daemon was restarted; browser verification used isolated temporary data on loopback port 18091. Slack tests still pass alongside the named-destination integration tests; no remote message was sent.
+Product improvements 068–069 were implemented on 3 October 2026. The full `go test -race ./...` suite, `go vet ./...`, JavaScript syntax check, the configuration examples available at that time, and native/Linux arm64 builds pass. No existing development container or production daemon was restarted; browser verification used isolated temporary data on loopback port 18091. Slack tests still pass alongside the named-destination integration tests; no remote message was sent.
 
 Sampler tests cover the five-sample cap, two bounded analysis epochs, site/client scoping, allowlist exclusion, late arrivals, closed-window boundary protection, copied optional values, UTF-8/byte/control bounds and omitted query values. Scoring tests verify identical score/decision/event ID with and without samples. Storage tests write ten incidents (plus other server/site examples), check exactly fifty scoped samples, stable-ID deduplication, request-ID/literal path/method/status filters, bounded pagination, older-incident compatibility, default four-day read expiry, shorter configured retention and parent/orphan cleanup. Essential state survives. Local output tests verify four-day boundaries, multiline operational continuations, initial idle/legacy cleanup, managed archive scope, preserved permissions and atomic failure for malformed/oversized records.
 
@@ -70,7 +70,7 @@ A local Apple M1 Pro/macOS arm64 benchmark of the same aggregation fixture measu
 go test ./internal/aggregator -run '^$' -bench BenchmarkObserveIncidentSamples -benchmem
 ```
 
-Browser verification covered the populated Incident logs table, server/site/request-ID filters, repeated request examples from overlapping incidents, linked score details with five saved requests, site-scoped shortcuts, visible date labels and narrow-screen table scrolling. Retention work stays outside request ingestion, but physical deletion can lag the logical cutoff during bounded cleanup, file errors, or downtime. Production capacity/false-positive review remains open under ticket 021.
+Browser verification covered the populated Incident logs table, server/site/request-ID filters, repeated request examples from overlapping incidents, linked score details with five saved requests, site-scoped shortcuts, visible date labels and narrow-screen table scrolling. Retention work stays outside request ingestion, but physical deletion can lag the logical cutoff during bounded cleanup, file errors, or downtime. Production capacity/false-positive review remains open in the production validation checklist.
 
 ## README demonstration and review validation
 
@@ -99,4 +99,18 @@ Use this review record for each intended site and log period. Keep replay output
 | Sustained run | Duration, average/peak CPU and RSS, watcher lag, queue failures, dropped events, rotation/restart observations, and dashboard availability |
 | Decision | Whether monitor-only behavior is acceptable for the intended host; unresolved cases and owner |
 
-The replay CLI emits one JSON incident per line followed by a `summary` object. Run it with the production config and log paths, redirecting output into a private local file for review. Do not use synthetic Docker fixture results as evidence of production false-positive rates.
+The replay CLI with `-json` emits one JSON incident per line followed by a `summary` object. Run it with the production config and log paths, redirecting output into a private local file for review. Do not use synthetic Docker fixture results as evidence of production false-positive rates.
+
+## Production-review fixes — 4 October 2026
+
+All 11 findings in the production handoff now have fixes and regression coverage. The shared IP-range validator rejects mapped allow-all policies; quoted combined headers cannot inject identity metadata. Database failures stay visible across flush consumers and freeze checkpoints across lost writes. Damaged output files are quarantined with configurable retention while new records continue. Error-marker tests exercise persistence, APIs, local JSONL and SNS privacy. Closed windows and samples agree for 1/30/31/60-second configurations, and delayed scoring retains the same IDs/scores/evidence. Analysis uses a shared iterator and indexed site counts; route rendering shares one generation guard; Basic auth challenges with 401; PHP-FPM acquisition is concurrent and timestamped individually; incident pagination only advertises valid next pages.
+
+Full Go race/static/module/configuration checks and all 20 frontend regressions pass. Both Go source/toolchain and actual Go 1.26.8 Linux binary scans report no vulnerabilities; npm audit reports none. The smaller pinned Alpine development runtime replaces Debian packages with unavailable fixes and reports zero HIGH/CRITICAL OS package findings without exclusions. Its supervisor, four sites and dashboard were verified in an isolated container. Browser verification exercised all dashboard sections and five-request incident details using synthetic data.
+
+At 4,096 clients/8,192 records, local analysis measured 84 ms (formerly 1.81 seconds), or 110 ms with a dashboard scan and concurrent ingestion. The latter fixture observed about 90,483 ingestion operations/s and a 73.43 ms maximum ingestion call. These short, fixed-timestamp fixtures do not establish sustained source-lag/RSS/disk behavior. The CI workflow is checked in and ready for its first hosted run; production traffic review, sustained Linux acceptance and real destination checks remain open. The complete original finding/remediation table is preserved in the root `REVIEW_README.md`.
+
+## Engine-first CLI checks (4 October 2026)
+
+The race suite verifies readable reports, IP/site filtering before limits, retained-history expiry, details and terminal-control sanitization, and explicit JSON compatibility. Operator tests cover notification preview/no send, named/default legacy Slack tests with fake HTTP transports, provider failure exit status, help output, safe data cleanup, and UI config preservation. Process tests start the real CLI engine with the dashboard disabled and observe synthetic requests becoming local JSONL and readable CLI findings; with an unavailable SQLite path, monitoring still emits file incidents. A real Slack screenshot and live provider receipt remain deferred until an account is available.
+
+The headless process regression exposed a live scoring boundary gap: scheduled analysis used the newly opened second as its inclusive endpoint, skipping the first second of the window. Scheduled ticks now evaluate the complete window ending immediately before that boundary. Deterministic tests cover first/last-second inclusion and next-window exclusion for 1/2/30/31/60-second windows without recovery. Startup, trigger and shutdown retain their rolling partial-window behavior.

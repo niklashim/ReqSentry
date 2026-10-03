@@ -3,6 +3,8 @@ package daemon
 import (
 	"bytes"
 	"context"
+	"fmt"
+	"io"
 	"log"
 	"net/netip"
 	"os"
@@ -135,5 +137,43 @@ func TestAnalysisProducesMonitorOnlyIncident(t *testing.T) {
 	}
 	if !strings.Contains(output.String(), "NO ACTION TAKEN") {
 		t.Fatalf("operational log omitted monitor warning: %s", output.String())
+	}
+}
+
+func TestScheduledAnalysisIncludesFirstAndLastSecondsWithoutRecovery(t *testing.T) {
+	for _, seconds := range []int{1, 2, 30, 31, 60} {
+		t.Run(strconv.Itoa(seconds), func(t *testing.T) {
+			window := time.Duration(seconds) * time.Second
+			cfg := config.Config{Server: config.ServerConfig{Name: "test"}, AccessFiles: []config.AccessFile{{Path: "/tmp/access.log", Site: "shop"}}, Database: config.DatabaseConfig{Path: "/tmp/unused.db"}, Analysis: config.AnalysisConfig{Window: config.Duration{Duration: window}}}
+			if err := cfg.Validate(); err != nil {
+				t.Fatal(err)
+			}
+			boundary := time.Date(2026, 10, 4, 12, 0, 0, 0, time.UTC).Truncate(window)
+			rollup := aggregator.New(cfg.Aggregation, window)
+			ip := netip.MustParseAddr("203.0.113.31")
+			for j := 0; j < 300; j++ {
+				at := boundary.Add(-window)
+				rollup.Observe(model.RequestEvent{Timestamp: at, SiteID: "shop", ClientIP: ip, Method: "POST", Path: fmt.Sprintf("/scan/%d", j), Status: 404}, false, at)
+			}
+			at := boundary.Add(-time.Second)
+			rollup.Observe(model.RequestEvent{Timestamp: at, SiteID: "shop", ClientIP: ip, Method: "GET", Path: "/", Status: 200}, false, at)
+			// This new-window request must not displace the earliest completed second.
+			rollup.Observe(model.RequestEvent{Timestamp: boundary, SiteID: "shop", ClientIP: ip, Method: "GET", Path: "/new", Status: 200}, false, boundary)
+			d := New(cfg, log.New(io.Discard, "", 0))
+			engine, err := scoring.New(cfg.Detection)
+			if err != nil {
+				t.Fatal(err)
+			}
+			d.analyzeClosedWindow(rollup, engine, boundary)
+			incidents := d.Incidents()
+			if len(incidents) != 2 {
+				t.Fatalf("lost closed-window incidents: %+v", incidents)
+			}
+			for _, i := range incidents {
+				if i.Requests != 301 || i.Decision != model.DecisionWouldBlock || !i.WindowEnd.Equal(boundary.Add(-time.Nanosecond)) {
+					t.Fatalf("incorrect completed window: %+v", i)
+				}
+			}
+		})
 	}
 }

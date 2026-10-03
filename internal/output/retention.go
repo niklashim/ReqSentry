@@ -19,6 +19,79 @@ type fileRetention struct {
 	kind string
 }
 
+var errCorruptOutput = errors.New("undated or oversized output record")
+
+// Keep a damaged file as bounded evidence, then let the active writer start a
+// healthy file. Use the earliest known date so quarantine never extends the
+// lifetime of dated evidence; unknown dates use the original file modification.
+func (r *fileRetention) prepare(path string, now time.Time, diagnostics ...io.Writer) (time.Time, time.Time, error) {
+	lo, hi, err := r.pruneFile(path, now)
+	if !errors.Is(err, errCorruptOutput) {
+		return lo, hi, err
+	}
+	info, statErr := os.Stat(path)
+	if statErr != nil {
+		return lo, hi, statErr
+	}
+	at := info.ModTime()
+	if at.After(now) {
+		at = now
+	}
+	if !lo.IsZero() && lo.Before(at) {
+		at = lo
+	}
+	// An oversized record may have stopped the first pass before older dated
+	// evidence. Scan the remainder in bounded chunks before assigning retention.
+	if earliest, err := r.earliestDate(path); err != nil {
+		return lo, hi, err
+	} else if !earliest.IsZero() && earliest.Before(at) {
+		at = earliest
+	}
+	name := fmt.Sprintf("%s.reqsentry.%d.%d.quarantine", path, at.UnixNano(), now.UnixNano())
+	if err := os.Rename(path, name); err != nil {
+		return lo, hi, err
+	}
+	if len(diagnostics) > 0 && diagnostics[0] != nil {
+		fmt.Fprintf(diagnostics[0], "ReqSentry damaged output quarantined source=%s quarantine=%s; starting healthy output\n", path, name)
+	}
+	if !at.Add(r.age).After(now) {
+		if err := os.Remove(name); err != nil {
+			return lo, hi, err
+		}
+	}
+	return time.Time{}, time.Time{}, nil
+}
+
+func (r *fileRetention) earliestDate(path string) (time.Time, error) {
+	f, err := os.Open(path)
+	if err != nil {
+		return time.Time{}, err
+	}
+	defer f.Close()
+	reader := bufio.NewReader(f)
+	var earliest time.Time
+	for {
+		line, err := readRetentionLine(reader)
+		if errors.Is(err, errCorruptOutput) {
+			// Discard the rest of this oversized line without retaining its bytes.
+			for {
+				_, err = reader.ReadSlice('\n')
+				if err != bufio.ErrBufferFull {
+					break
+				}
+			}
+		} else if at, parseErr := r.recordTime(line); parseErr == nil && (earliest.IsZero() || at.Before(earliest)) {
+			earliest = at
+		}
+		if err == io.EOF {
+			return earliest, nil
+		}
+		if err != nil {
+			return earliest, err
+		}
+	}
+}
+
 func (r *fileRetention) recordTime(data []byte) (time.Time, error) {
 	if r.kind == "incidents" {
 		var v struct {
@@ -62,6 +135,16 @@ func (r *fileRetention) pruneArchives(path string, now time.Time) error {
 			continue
 		}
 		parts := strings.Split(strings.TrimPrefix(entry.Name(), prefix), ".")
+		if len(parts) == 3 && parts[2] == "quarantine" {
+			oldest, e1 := strconv.ParseInt(parts[0], 10, 64)
+			_, e2 := strconv.ParseInt(parts[1], 10, 64)
+			if e1 == nil && e2 == nil && !time.Unix(0, oldest).After(cutoff) {
+				if err := os.Remove(filepath.Join(filepath.Dir(path), entry.Name())); err != nil {
+					return err
+				}
+			}
+			continue
+		}
 		if len(parts) != 4 || parts[3] != "archive" {
 			continue
 		}
@@ -131,6 +214,8 @@ func (r *fileRetention) pruneFile(path string, now time.Time) (time.Time, time.T
 	cutoff := now.Add(-r.age)
 	var previous time.Time
 	removed := false
+	corrupt := false
+	var earliestKnown time.Time
 	for {
 		line, readErr := readRetentionLine(reader)
 		if len(line) > 0 {
@@ -139,8 +224,15 @@ func (r *fileRetention) pruneFile(path string, now time.Time) (time.Time, time.T
 				if r.kind == "operational" && !previous.IsZero() {
 					at = previous
 				} else {
-					return first, last, errors.New("undated output record prevents retention")
+					corrupt = true
+					if readErr == io.EOF {
+						break
+					}
+					continue
 				}
+			}
+			if earliestKnown.IsZero() || at.Before(earliestKnown) {
+				earliestKnown = at
 			}
 			previous = at
 			if at.Before(cutoff) {
@@ -163,6 +255,9 @@ func (r *fileRetention) pruneFile(path string, now time.Time) (time.Time, time.T
 		if readErr != nil {
 			return first, last, readErr
 		}
+	}
+	if corrupt {
+		return earliestKnown, last, errCorruptOutput
 	}
 	if err := writer.Flush(); err != nil {
 		return first, last, err
@@ -191,7 +286,7 @@ func readRetentionLine(reader *bufio.Reader) ([]byte, error) {
 	for {
 		part, err := reader.ReadSlice('\n')
 		if len(line)+len(part) > 1<<20 {
-			return nil, errors.New("output line exceeds retention limit")
+			return nil, errCorruptOutput
 		}
 		line = append(line, part...)
 		if err != bufio.ErrBufferFull {

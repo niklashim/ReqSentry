@@ -93,13 +93,13 @@ func TestAuthenticationAndReadOnlyRoutes(t *testing.T) {
 	r.RemoteAddr = "127.0.0.1:1234"
 	w := httptest.NewRecorder()
 	s.Handler().ServeHTTP(w, r)
-	if w.Code != 403 {
+	if w.Code != http.StatusUnauthorized || w.Header().Get("WWW-Authenticate") == "" {
 		t.Fatalf("missing auth status=%d", w.Code)
 	}
 	r.SetBasicAuth("admin", "wrong")
 	w = httptest.NewRecorder()
 	s.Handler().ServeHTTP(w, r)
-	if w.Code != 403 {
+	if w.Code != http.StatusUnauthorized || w.Header().Get("WWW-Authenticate") == "" {
 		t.Fatalf("bad auth status=%d", w.Code)
 	}
 	r.SetBasicAuth("admin", "top-secret")
@@ -188,5 +188,16 @@ func TestDashboardRouteSecurityAndResponseSize(t *testing.T) {
 	jsonResponse(w, map[string]string{"value": strings.Repeat("x", maxJSONResponseBytes)})
 	if w.Code != http.StatusServiceUnavailable || len(w.Body.Bytes()) > 100 {
 		t.Fatalf("oversized JSON status=%d bytes=%d", w.Code, len(w.Body.Bytes()))
+	}
+}
+
+func TestDashboardRejectsMappedAllowAllPolicies(t *testing.T) {
+	for _, cfg := range []config.WebConfig{
+		{AllowedIPs: []string{"::ffff:0.0.0.0/96"}},
+		{AllowedIPs: []string{"127.0.0.1"}, TrustedProxies: []string{"::ffff:0.0.0.0/96"}},
+	} {
+		if _, err := New(cfg, fixtureSource{}, nil, nil); err == nil {
+			t.Fatal("mapped allow-all policy accepted")
+		}
 	}
 }

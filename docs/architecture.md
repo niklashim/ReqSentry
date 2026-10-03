@@ -1,11 +1,11 @@
 # Code architecture
 
-ReqSentry is a single Go daemon. Its data path is intentionally one way: access logs and optional local health inputs produce monitor-only decisions; the dashboard and integrations read those results but never change incoming traffic.
+ReqSentry is a single Go monitoring engine with a primary CLI workflow and optional dashboard. Its data path is intentionally one way: access logs and optional local health inputs produce monitor-only decisions; the dashboard and integrations read those results but never change incoming traffic.
 
 ```text
 access logs → watcher → parser → client identity → rolling aggregator
                                             ├→ analysis trigger → detectors → scoring
-                                            │                              └→ SQLite / JSONL / notification destinations
+                                            │                              └→ SQLite / JSONL / notification destinations / CLI reports
                                             └→ dashboard API and shared SSE stream
 Linux health / PHP-FPM ──────────────────────┘
 ```
@@ -14,7 +14,7 @@ Linux health / PHP-FPM ───────────────────
 
 | Area | Package | Responsibility |
 | --- | --- | --- |
-| Entry point and CLI | `cmd/reqsentry` | Load configuration, run the service, report status, and replay logs. |
+| Entry point and CLI | `cmd/reqsentry` | Load configuration, run the engine, report/filter IP findings, replay logs, test notifications, toggle the UI, and clean local data. |
 | Configuration | `internal/config` | Apply defaults, reject unsafe values, and resolve secrets from the environment or systemd credentials. |
 | Input | `internal/watcher`, `internal/parser`, `internal/clientidentity`, `internal/correlation` | Follow log rotation with saved offsets, parse configured combined/JSON/logfmt and error formats, resolve trusted proxy/allowlist policy, and attach bounded error associations without changing scores. |
 | In-memory state | `internal/aggregator` | Maintain exact rolling server/site counters and bounded tracked-IP evidence. The same state feeds detection and live dashboard views. |
@@ -23,7 +23,7 @@ Linux health / PHP-FPM ───────────────────
 | Dashboard | `internal/dashboard` | Apply allowlist/authentication, expose bounded read-only API routes, and publish one aggregate SSE update for all viewers. `assets/` contains the embedded UI. |
 | Orchestration | `internal/daemon`, `internal/replay` | Connect components for live monitoring or deterministic historical replay. |
 
-The parser's configured site ID is authoritative; a request's `Host` header is supporting evidence. The aggregator has 61 one-second buckets so a complete minute can be closed before its first bucket is reused. It preserves exact basic request/status totals even when tracked-IP detail reaches a configured cap or degraded mode. Path, query, User-Agent, and IP lists are samples with coverage labels; they are not complete historical inventories. See [dashboard data semantics](dashboard.md) and [storage behavior](storage-output.md).
+The parser's configured site ID is authoritative; a request's `Host` header is supporting evidence. The aggregator retains 121 one-second buckets for closed-window analysis; live views remain bounded to their requested horizon. It preserves exact basic request/status totals even when tracked-IP detail reaches a configured cap or degraded mode. Path, query, User-Agent, and IP lists are samples with coverage labels; they are not complete historical inventories. See [dashboard data semantics](dashboard.md) and [storage behavior](storage-output.md).
 
 ## Concurrency and failure boundaries
 
@@ -40,6 +40,6 @@ The parser's configured site ID is authoritative; a request's `Host` header is s
 3. For dashboard changes, exercise the local Compose fixture and [k6 scenarios](../tests/k6/README.md), then check API coverage labels, denied routes, saved incidents, and resource use.
 4. Keep the root [README](../README.md) short and update the appropriate operations guide when behavior or limits change.
 
-The [original project brief](project-brief.md) explains the design goals. The [ticket index](../Tickets/README.md) records delivery history and open validation requirements.
+The [original project brief](project-brief.md) explains the design goals. [Validation](validation.md) records delivery evidence and open production requirements.
 
 Structured source selection is shared by live monitoring, preview, replay, and optional crash recovery. Error events remain distinct from requests; `internal/correlation` stores independent bounded request/error rings and produces immutable incident context. Notification workers own routing/retries and never perform provider work in the request hot path. [Structured logs](structured-logs.md), [error correlation](error-correlation.md), [notifications](notifications.md), and [storage/recovery](storage-output.md) define their contracts and limits.

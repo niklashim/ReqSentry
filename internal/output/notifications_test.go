@@ -106,13 +106,13 @@ func TestTeamsCardsAndRedactedThrottling(t *testing.T) {
 func TestSNSBudgetStackPrivacyAndPermanentErrors(t *testing.T) {
 	f := &fakeSNS{}
 	send := snsSender(f, config.DestinationConfig{TopicARN: "arn:aws:sns:eu-west-1:123456789012:alerts"})
-	incident := &model.Incident{EventID: "stable", SiteID: "shop", MonitorOnly: true, Signals: []model.Signal{{Code: "HIGH_RATE", Evidence: map[string]any{"sample": strings.Repeat("x", 300<<10)}}}, Errors: &model.ErrorContext{Samples: []model.ErrorMatch{{Event: model.ErrorEvent{StackTrace: "PRIVATE STACK", Message: "redacted message"}}}}}
+	incident := &model.Incident{EventID: "stable", SiteID: "shop", MonitorOnly: true, Signals: []model.Signal{{Code: "HIGH_RATE", Evidence: map[string]any{"sample": strings.Repeat("x", 300<<10)}}}, Errors: &model.ErrorContext{Samples: []model.ErrorMatch{{Event: model.ErrorEvent{StackTrace: "PRIVATE STACK", Message: "AUDIT_SECRET"}}}}}
 	e := Notification{Version: 1, ID: "stable", Kind: "incident", Server: "test", MonitorOnly: true, Incident: incident}
 	if _, err := send(context.Background(), e); err != nil {
 		t.Fatal(err)
 	}
 	var body Notification
-	if err := json.Unmarshal([]byte(*f.input.Message), &body); err != nil || !body.Truncated || body.ID != "stable" || len(*f.input.Message) > 250<<10 || strings.Contains(*f.input.Message, "PRIVATE STACK") {
+	if err := json.Unmarshal([]byte(*f.input.Message), &body); err != nil || !body.Truncated || body.ID != "stable" || len(*f.input.Message) > 250<<10 || strings.Contains(*f.input.Message, "PRIVATE STACK") || strings.Contains(*f.input.Message, "AUDIT_SECRET") {
 		t.Fatalf("unsafe budget handling %+v %v", body, err)
 	}
 	if incident.Errors.Samples[0].Event.StackTrace != "PRIVATE STACK" || incident.Signals[0].Evidence == nil {

@@ -12,13 +12,28 @@ Every destination has an independent bounded queue (default 128, maximum 1,024) 
 
 Queues and cooldowns are in memory, so restarts may lose pending messages or repeat alerts. An ambiguous network timeout can also cause duplicate delivery. Provider acceptance is not proof of Teams posting, subscriber receipt, or human acknowledgment. Operational remote messages summarize the failing source and recurrence count; inspect local diagnostics for details. Notification failures do not create recursive remote failure alerts.
 
-Configuration checks, preview, and replay send no messages. To explicitly send a synthetic test to an enabled **named** destination:
+Configuration checks, preview, and replay send no messages. To explicitly send a synthetic test to an enabled destination (legacy `output.slack` uses `legacy-slack`):
 
 ```sh
 reqsentry -config /etc/reqsentry/config.yaml notifications test teams-operations
 ```
 
 The response reports provider acceptance; check the destination separately. All incident messages state monitor mode and no action taken. Card/text fields are bounded and escaped; messages do not include stack traces. SNS JSON includes redacted correlation samples, but excludes local stack traces.
+
+## Slack preview and setup
+
+The [config reference](../configs/example.yaml) includes legacy `output.slack` and named Slack destinations. Choose one style. Configure an incoming-webhook secret via `webhook_env` or `webhook_credential`; never write the URL in YAML. The accepted endpoints are HTTPS incoming-webhook URLs under `hooks.slack.com` or `hooks.slack-gov.com` with a `/services/` path.
+
+```sh
+# Works without Slack credentials; sends nothing:
+reqsentry -config /etc/reqsentry/config.yaml notifications preview
+# Explicitly sends a synthetic test after setup:
+reqsentry -config /etc/reqsentry/config.yaml notifications test legacy-slack
+```
+
+The offline preview uses the actual incident formatter and fictional values. Outgoing incident text includes server/site/IP, analysis window, request count, peak rate, up to four evidence codes, score/decision, optional CPU/ASN/enrichment, and the monitor-only notice. Full evidence remains in the CLI report and stored incident.
+
+Omit the test name when exactly one destination is enabled; multiple destinations require an explicit name. Test covers both legacy Slack and named destinations. Shell commands need the configured secret in the calling environment or `CREDENTIALS_DIRECTORY`; systemd does not export its credentials to your shell. Actual receipt remains an account-specific smoke test. See [CLI credentials and operations](cli.md).
 
 ## Microsoft Teams
 
@@ -34,6 +49,6 @@ Set `type: sns`, a standard topic `topic_arn`, and its matching `region`. FIFO t
 
 Grant `sns:Publish` only on the selected topic. Cross-account publishing also requires the topic's resource policy; encrypted topics may require permissions on the KMS key. Create/manage topics and subscriptions separately. This integration does not send SMS directly or create AWS infrastructure.
 
-The UTF-8 message string contains a version-1 JSON envelope with `event_id`, `event_kind`, `server`, optional `site`, `timestamp`, `monitor_only`, and incident or operational content. The incident contains its analysis window. It is ordinary JSON in `Message`, not SNS protocol-specific `MessageStructure=json`. Attributes include `event_kind`, `site`, and `decision` for incidents; server-wide incidents use attribute `site=all-sites` while the JSON incident keeps its empty `site_id`. Payloads reserve attribute space within a conservative 256 KiB budget; oversized optional signal evidence is removed with `truncated: true`, and still-oversized messages fail visibly. SNS subscribers can deduplicate stable event IDs across retries. SDK retry attempts are disabled so the shared worker owns the attempt budget. Credential and client-side API failures terminate the current delivery without retries; throttling, server failures, and eligible transport failures use the shared bounded retry policy.
+The UTF-8 message string contains a version-1 JSON envelope with `event_id`, `event_kind`, `server`, optional `site`, `timestamp`, `monitor_only`, and incident or operational content. The incident contains its analysis window. Error messages and stacks are omitted from SNS exports; correlation counts and association metadata remain. It is ordinary JSON in `Message`, not SNS protocol-specific `MessageStructure=json`. Attributes include `event_kind`, `site`, and `decision` for incidents; server-wide incidents use attribute `site=all-sites` while the JSON incident keeps its empty `site_id`. Payloads reserve attribute space within a conservative 256 KiB budget; oversized optional signal evidence is removed with `truncated: true`, and still-oversized messages fail visibly. SNS subscribers can deduplicate stable event IDs across retries. SDK retry attempts are disabled so the shared worker owns the attempt budget. Credential and client-side API failures terminate the current delivery without retries; throttling, server failures, and eligible transport failures use the shared bounded retry policy.
 
 [AWS's Publish API](https://docs.aws.amazon.com/sns/latest/api/API_Publish.html) describes regional/topic publishing and message attributes. The status acknowledgment is the returned SNS message ID, not downstream delivery confirmation. Mock SDK tests verify the contract; a controlled topic/subscriber smoke test is still required for a specific AWS account.

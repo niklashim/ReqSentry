@@ -35,6 +35,7 @@ func (s *Store) WriteError(e model.ErrorEvent) error {
 	case s.errorQueue <- e:
 		return nil
 	default:
+		s.writeLoss = ErrQueueFull
 		return errors.New("SQLite error queue full")
 	}
 }

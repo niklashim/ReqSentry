@@ -1,0 +1,74 @@
+name: Regression and release checks
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: checks-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  regression:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version: '1.27.x'
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: '24'
+          cache: npm
+          cache-dependency-path: tests/dashboard/package-lock.json
+      - name: Go regressions and static checks
+        run: |
+          go mod verify
+          go vet ./...
+          go test -race ./...
+          go build -trimpath -o /tmp/reqsentry ./cmd/reqsentry
+          /tmp/reqsentry -config configs/example.yaml config test
+          /tmp/reqsentry -config docker/webserver/reqsentry.yaml config test
+      - name: Dashboard regressions and dependency audit
+        working-directory: tests/dashboard
+        run: |
+          npm ci
+          npm test
+          npm audit --audit-level=high
+          node --check ../../internal/dashboard/assets/app.js
+      - name: Scan Go source and development toolchain
+        run: |
+          go install golang.org/x/vuln/cmd/govulncheck@v1.8.0
+          govulncheck ./...
+
+  container:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version: '1.27.x'
+      - name: Build and verify the actual container binary
+        run: |
+          docker build -f docker/webserver/Dockerfile -t reqsentry-ci .
+          container=$(docker create reqsentry-ci)
+          trap 'docker rm "$container"' EXIT
+          docker cp "$container":/usr/local/bin/reqsentry /tmp/reqsentry-release
+          go version -m /tmp/reqsentry-release
+          go install golang.org/x/vuln/cmd/govulncheck@v1.8.0
+          govulncheck -mode=binary /tmp/reqsentry-release
+      - name: Scan container operating-system packages
+        run: |
+          docker run --rm -v /var/run/docker.sock:/var/run/docker.sock:ro \
+            aquasec/trivy:0.75.0@sha256:af6acf9a6b85dfe389a1941505c0ce9efef52a4719635e1a962f022a3d855daa \
+            image --pkg-types os --scanners vuln --severity HIGH,CRITICAL --exit-code 1 reqsentry-ci

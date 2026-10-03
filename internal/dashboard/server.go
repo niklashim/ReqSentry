@@ -21,6 +21,7 @@ import (
 	"github.com/niklashim/ReqSentry/internal/aggregator"
 	"github.com/niklashim/ReqSentry/internal/config"
 	"github.com/niklashim/ReqSentry/internal/enrichment"
+	"github.com/niklashim/ReqSentry/internal/iprange"
 	"github.com/niklashim/ReqSentry/internal/model"
 	"github.com/niklashim/ReqSentry/internal/phpfpm"
 	"github.com/niklashim/ReqSentry/internal/serverhealth"
@@ -251,31 +252,21 @@ func (s *Server) deny(w http.ResponseWriter, r *http.Request, address netip.Addr
 	if count&(count-1) == 0 && s.logger != nil {
 		s.logger.Printf("dashboard access denied source=%s reason=%s count=%d", address, reason, count)
 	}
-	http.Error(w, "forbidden", http.StatusForbidden)
+	if reason == "AUTH_FAILED" {
+		http.Error(w, "authentication required", http.StatusUnauthorized)
+	} else {
+		http.Error(w, "forbidden", http.StatusForbidden)
+	}
 }
 
 func parseRanges(values []string) ([]netip.Prefix, error) {
 	result := make([]netip.Prefix, 0, len(values))
 	for _, value := range values {
-		if prefix, err := netip.ParsePrefix(value); err == nil {
-			if prefix.Bits() == 0 {
-				return nil, errors.New("all-address CIDR is not allowed")
-			}
-			if prefix.Addr().Is4In6() {
-				if prefix.Bits() < 96 {
-					return nil, errors.New("mapped IPv4 CIDR is too broad")
-				}
-				prefix = netip.PrefixFrom(prefix.Addr().Unmap(), prefix.Bits()-96)
-			}
-			result = append(result, prefix.Masked())
-			continue
-		}
-		address, err := netip.ParseAddr(value)
+		prefix, err := iprange.Parse(value)
 		if err != nil {
-			return nil, fmt.Errorf("invalid IP or CIDR %q", value)
+			return nil, err
 		}
-		address = address.Unmap()
-		result = append(result, netip.PrefixFrom(address, address.BitLen()))
+		result = append(result, prefix)
 	}
 	return result, nil
 }

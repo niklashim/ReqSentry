@@ -7,6 +7,18 @@ import (
 )
 
 func (s *Store) SaveOffsets(ctx context.Context, offsets map[string]Offset) error {
+	if err := s.beginDurable(ctx); err != nil {
+		return err
+	}
+	defer s.endDurable()
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.writeLoss != nil {
+		return s.writeLoss
+	}
+	if s.workerError != nil {
+		return s.workerError
+	}
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
 		return err

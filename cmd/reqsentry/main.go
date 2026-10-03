@@ -35,16 +35,25 @@ func run(args []string, stdout, stderr io.Writer) int {
 	flags.SetOutput(stderr)
 	path := flags.String("config", config.DefaultPath, "path to YAML configuration")
 	check := flags.Bool("check", false, "validate configuration and exit")
-	limit := flags.Int("limit", 20, "incident report limit")
+	limit := flags.Int("limit", 20, "incident report limit (1–1000)")
+	jsonOutput := flags.Bool("json", false, "machine-readable status, report, and replay output")
+	ip := flags.String("ip", "", "filter report by client IP")
+	site := flags.String("site", "", "filter report by configured site")
+	details := flags.Bool("details", false, "include signal weights and saved requests in reports")
+	confirm := flags.Bool("confirm", false, "confirm deletion for data clean")
+	flags.Usage = func() { printUsage(stderr, flags) }
 	if err := flags.Parse(args); err != nil {
+		if errors.Is(err, flag.ErrHelp) {
+			return 0
+		}
 		return 2
 	}
 	command := strings.Join(flags.Args(), " ")
 	isReplay := flags.NArg() > 0 && flags.Arg(0) == "replay"
 	preview := flags.NArg() == 2 && flags.Arg(0) == "preview"
-	testNotification := flags.NArg() == 3 && flags.Arg(0) == "notifications" && flags.Arg(1) == "test"
-	if !isReplay && !preview && !testNotification && command != "prune preview" && command != "" && command != "config test" && command != "status" && command != "report" && command != "maxmind status" && command != "maxmind update" {
-		fmt.Fprintln(stderr, "usage: reqsentry [-config PATH] [-check] [-limit N] [config test|status|report|maxmind status|maxmind update|preview LOG|replay LOG...|notifications test NAME|prune preview]")
+	testNotification := (flags.NArg() == 2 || flags.NArg() == 3) && flags.Arg(0) == "notifications" && flags.Arg(1) == "test"
+	if !isReplay && !preview && !testNotification && command != "prune preview" && command != "data clean" && command != "data preview" && command != "ui enable" && command != "ui disable" && command != "notifications preview" && command != "" && command != "config test" && command != "status" && command != "report" && command != "maxmind status" && command != "maxmind update" {
+		flags.Usage()
 		return 2
 	}
 	cfg, err := config.Load(*path)
@@ -89,12 +98,40 @@ func run(args []string, stdout, stderr io.Writer) int {
 		}
 		return 0
 	}
+	if command == "ui enable" || command == "ui disable" {
+		return toggleUI(*path, command == "ui enable", stdout, stderr)
+	}
+	if command == "data clean" || command == "data preview" {
+		return cleanData(cfg, *path, command == "data preview", *confirm, stdout, stderr)
+	}
+	if command == "notifications preview" {
+		fmt.Fprintln(stdout, "MOCK SLACK INCIDENT — synthetic data; no message sent")
+		fmt.Fprintln(stdout, output.SlackIncidentText(mockIncident()))
+		return 0
+	}
 	if testNotification {
-		n := output.NewNotifications(cfg.Output.Destinations, log.New(stderr, "", 0), cfg.Server.Name)
+		destinations := notificationDestinations(cfg.Output)
+		name := flags.Arg(2)
+		if name == "" {
+			for _, d := range destinations {
+				if d.Enabled {
+					if name != "" {
+						fmt.Fprintln(stderr, "multiple destinations enabled; specify a name (legacy output.slack is legacy-slack)")
+						return 2
+					}
+					name = d.Name
+				}
+			}
+			if name == "" {
+				fmt.Fprintln(stderr, "no notification destinations enabled")
+				return 1
+			}
+		}
+		n := output.NewNotifications(destinations, log.New(stderr, "", 0), cfg.Server.Name)
 		defer n.Close()
 		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 		defer cancel()
-		if err := n.Test(ctx, flags.Arg(2)); err != nil {
+		if err := n.Test(ctx, name); err != nil {
 			fmt.Fprintln(stderr, err)
 			return 1
 		}
@@ -130,10 +167,32 @@ func run(args []string, stdout, stderr io.Writer) int {
 			paths = append(paths, absolute)
 		}
 		encoder := json.NewEncoder(stdout)
-		summary, err := replay.Run(context.Background(), paths, cfg, func(incident model.Incident) error { return encoder.Encode(incident) })
+		var table *incidentPrinter
+		if !*jsonOutput {
+			table = newIncidentPrinter(stdout, "Historical log analysis — MONITOR ONLY", *details)
+		}
+		summary, err := replay.Run(context.Background(), paths, cfg, func(incident model.Incident) error {
+			if *jsonOutput {
+				return encoder.Encode(incident)
+			}
+			return table.Write(incident)
+		})
+		if table != nil {
+			if flushErr := table.Close(); err == nil {
+				err = flushErr
+			}
+		}
 		if err != nil {
 			fmt.Fprintln(stderr, err)
 			return 1
+		}
+		if !*jsonOutput {
+			_, err := fmt.Fprintf(stdout, "\nParsed: %d  Malformed: %d  Allowlisted: %d  Dropped: %d  Errors: %d  Incidents: %d\n", summary.Parsed, summary.BadLines, summary.Allowlisted, summary.Dropped, summary.ErrorEvents, summary.Incidents)
+			if err != nil {
+				fmt.Fprintln(stderr, err)
+				return 1
+			}
+			return 0
 		}
 		if err := encoder.Encode(struct {
 			Summary replay.Summary `json:"summary"`
@@ -144,7 +203,35 @@ func run(args []string, stdout, stderr io.Writer) int {
 		return 0
 	}
 	if command != "" {
-		return runOperator(command, *limit, cfg, stdout, stderr)
+		return runOperator(command, operatorOptions{limit: *limit, json: *jsonOutput, ip: *ip, site: *site, details: *details}, cfg, stdout, stderr)
+	}
+	guard, err := dataGuard(cfg.Database.Path, false)
+	guardErr := err
+	if guardErr != nil {
+		if errors.Is(guardErr, syscall.EWOULDBLOCK) {
+			fmt.Fprintln(stderr, guardErr)
+			return 1
+		}
+		fmt.Fprintf(stderr, "SQLite protection lock unavailable; monitoring continues without SQLite: %v\n", guardErr)
+	} else {
+		defer guard.Close()
+	}
+	// File output has its own protection so SQLite failure cannot disable it.
+	for _, file := range []*config.FileOutputConfig{&cfg.Output.Log, &cfg.Output.Incidents} {
+		if !file.Enabled {
+			continue
+		}
+		fileGuard, lockErr := dataGuard(file.Path, false)
+		if lockErr != nil {
+			if errors.Is(lockErr, syscall.EWOULDBLOCK) {
+				fmt.Fprintln(stderr, lockErr)
+				return 1
+			}
+			fmt.Fprintf(stderr, "local output unavailable path=%s; monitoring continues: %v\n", file.Path, lockErr)
+			file.Enabled = false
+		} else {
+			defer fileGuard.Close()
+		}
 	}
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
@@ -170,7 +257,11 @@ func run(args []string, stdout, stderr io.Writer) int {
 		service.SetEnricher(manager)
 	}
 	var sinks output.Fanout
-	store, err := storage.Open(cfg.Database.Path, stderr)
+	var store *storage.Store
+	err = guardErr
+	if guardErr == nil {
+		store, err = storage.Open(cfg.Database.Path, stderr)
+	}
 	if err != nil {
 		logger.Printf("SQLite unavailable; monitoring continues without persistent history or restart offsets: %v", err)
 	} else {
@@ -188,11 +279,9 @@ func run(args []string, stdout, stderr io.Writer) int {
 		defer file.Close()
 		sinks = append(sinks, output.IncidentFile{File: file})
 	}
-	destinations := append([]config.DestinationConfig(nil), cfg.Output.Destinations...)
+	destinations := notificationDestinations(cfg.Output)
 	slackStatus := "disabled"
 	if cfg.Output.Slack.Enabled {
-		legacy := cfg.Output.Slack
-		destinations = append(destinations, config.DestinationConfig{Name: "legacy-slack", Type: "slack", Enabled: true, WebhookEnv: legacy.WebhookEnv, WebhookCredential: legacy.WebhookCredential, MinimumScore: legacy.MinimumScore, Cooldown: legacy.Cooldown, Operational: true, QueueSize: 128, MaxAttempts: 3, MaxAge: config.Duration{Duration: time.Minute}})
 		slackStatus = "configured"
 	}
 	notifications := output.NewNotifications(destinations, logger, cfg.Server.Name)
@@ -257,8 +346,18 @@ func run(args []string, stdout, stderr io.Writer) int {
 	return 0
 }
 
-func runOperator(command string, limit int, cfg config.Config, stdout, stderr io.Writer) int {
-	if _, err := os.Stat(cfg.Database.Path); err != nil {
+func runOperator(command string, options operatorOptions, cfg config.Config, stdout, stderr io.Writer) int {
+	if err := options.validate(command); err != nil {
+		fmt.Fprintln(stderr, err)
+		return 2
+	}
+	guard, err := dataGuard(cfg.Database.Path, false)
+	if err != nil {
+		fmt.Fprintln(stderr, err)
+		return 1
+	}
+	defer guard.Close()
+	if _, err := os.Stat(cfg.Database.Path); err != nil && !strings.HasPrefix(command, "maxmind ") {
 		fmt.Fprintf(stderr, "SQLite state unavailable: %v\n", err)
 		return 1
 	}
@@ -292,13 +391,18 @@ func runOperator(command string, limit int, cfg config.Config, stdout, stderr io
 		if !found {
 			status = daemon.Status{SQLite: "available", MaxMind: "unknown", Slack: "unknown"}
 		}
-		if err := encoder.Encode(status); err != nil {
+		if options.json {
+			err = encoder.Encode(status)
+		} else {
+			err = printStatus(stdout, status, cfg.Server.Name)
+		}
+		if err != nil {
 			fmt.Fprintln(stderr, err)
 			return 1
 		}
 	case "report":
 		store.SetRetention(cfg.Database.Retention)
-		incidents, err := store.RecentIncidents(ctx, limit)
+		incidents, err := store.FilteredIncidents(ctx, options.limit, options.ip, options.site)
 		if err != nil {
 			fmt.Fprintln(stderr, err)
 			return 1
@@ -306,7 +410,12 @@ func runOperator(command string, limit int, cfg config.Config, stdout, stderr io
 		if incidents == nil {
 			incidents = []model.Incident{}
 		}
-		if err := encoder.Encode(incidents); err != nil {
+		if options.json {
+			err = encoder.Encode(incidents)
+		} else {
+			err = printIncidents(stdout, incidents, options.details)
+		}
+		if err != nil {
 			fmt.Fprintln(stderr, err)
 			return 1
 		}

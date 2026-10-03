@@ -440,9 +440,9 @@ async function overview(generation, background) {
   overviewRetryAt = 0;
 }
 
-async function sites() {
+async function sites(view) {
   setTitle("Sites");
-  clear(root);
+  clear(view);
   const data = await api("sites"),
     p = panel("Monitored sites"),
     bar = node("div", null, "toolbar"),
@@ -512,20 +512,20 @@ async function sites() {
   };
   select.addEventListener("change", renderRows);
   renderRows();
-  root.append(
+  view.append(
     p,
     note(
       "Traffic covers the rolling minute. Incident counts cover at most 100 recent saved decisions in memory over five minutes. Select a site for details.",
     ),
   );
 }
-async function siteDetail(site) {
+async function siteDetail(site, view) {
   setTitle("Site details");
-  clear(root);
+  clear(view);
   const d = await api("sites/" + encodeURIComponent(site) + "?range=" + range),
     s = d.site;
-  root.append(node("h2", s.site_id || "Default site"));
-  rangeControl(root);
+  view.append(node("h2", s.site_id || "Default site"));
+  rangeControl(view);
   const cards = node("div", null, "grid metrics");
   append(
     cards,
@@ -543,7 +543,7 @@ async function siteDetail(site) {
     ),
     metric("Incidents", fmt(d.incident_count_24h), "last 24 hours"),
   );
-  root.append(cards);
+  view.append(cards);
   const pair = node("div", null, "grid two"),
     methods = panel("Methods"),
     statuses = panel("Response codes");
@@ -564,7 +564,7 @@ async function siteDetail(site) {
     ),
   );
   append(pair, methods, statuses);
-  root.append(pair);
+  view.append(pair);
   const ips = panel("Top tracked IPs");
   ips.append(
     table(
@@ -588,7 +588,7 @@ async function siteDetail(site) {
       ]),
     ),
   );
-  root.append(ips);
+  view.append(ips);
   const networksPanel = panel("Sampled networks");
   networksPanel.append(
     table(
@@ -601,7 +601,7 @@ async function siteDetail(site) {
       ]),
     ),
   );
-  root.append(networksPanel);
+  view.append(networksPanel);
   const sampleGrid = node("div", null, "grid two");
   for (const [heading, key] of [
     ["Requested path samples", "paths"],
@@ -621,7 +621,7 @@ async function siteDetail(site) {
     );
     sampleGrid.append(p);
   }
-  root.append(sampleGrid);
+  view.append(sampleGrid);
   if (d.history?.length) {
     const minutes = d.history[0].bucket_minutes || 1,
       g = panel("Traffic history");
@@ -633,14 +633,14 @@ async function siteDetail(site) {
       ),
       note("Incomplete or absent buckets appear as gaps."),
     );
-    root.append(g);
+    view.append(g);
   }
-  root.append(link("Search incident logs for this site", "#logs/"+encodeURIComponent(site)), await errorContext(site), recentPanel(d.recent_incidents || []), note(d.sample_coverage));
+  view.append(link("Search incident logs for this site", "#logs/"+encodeURIComponent(site)), await errorContext(site), recentPanel(d.recent_incidents || []), note(d.sample_coverage));
 }
 
-async function ips() {
+async function ips(view) {
   setTitle("IP explorer");
-  clear(root);
+  clear(view);
   const bar = node("div", null, "toolbar"),
     input = node("input"),
     button = node("button", "Inspect IP");
@@ -654,7 +654,7 @@ async function ips() {
     if (e.key === "Enter") button.click();
   });
   append(bar, input, button);
-  root.append(bar);
+  view.append(bar);
   const d = await api("ips?limit=50"),
     p = panel("Top tracked IPs");
   p.append(
@@ -669,7 +669,7 @@ async function ips() {
       ]),
     ),
   );
-  root.append(
+  view.append(
     p,
     note(
       d.sample_coverage +
@@ -677,9 +677,9 @@ async function ips() {
     ),
   );
 }
-async function ipDetail(rest) {
+async function ipDetail(rest, view) {
   setTitle("IP investigation");
-  clear(root);
+  clear(view);
   const [encodedIP, qs] = rest.split("?"),
     ip = decodeURIComponent(encodedIP),
     params = new URLSearchParams(qs || "");
@@ -692,7 +692,7 @@ async function ipDetail(rest) {
     s = d.snapshot,
     e = d.enrichment || {},
     latest = d.recent_incidents?.[0]?.incident;
-  root.append(node("h2", ip, "mono"));
+  view.append(node("h2", ip, "mono"));
   const cards = node("div", null, "grid metrics");
   append(
     cards,
@@ -715,7 +715,7 @@ async function ipDetail(rest) {
       "Historical · monitor only",
     ),
   );
-  root.append(cards);
+  view.append(cards);
   const pair = node("div", null, "grid two"),
     network = panel("Network"),
     pattern = panel("Request patterns");
@@ -737,7 +737,7 @@ async function ipDetail(rest) {
     kv("Query samples", (s.QueryPatternSamples || []).join(", ") || "—"),
   );
   append(pair, network, pattern);
-  root.append(pair);
+  view.append(pair);
   if (latest) {
     const detected = panel("Signals in last saved incident");
     detected.append(
@@ -752,7 +752,7 @@ async function ipDetail(rest) {
           "; open the incident for weights and context.",
       ),
     );
-    root.append(detected);
+    view.append(detected);
   }
   const methods = panel("Methods and responses");
   methods.append(
@@ -765,7 +765,7 @@ async function ipDetail(rest) {
       ]),
     ),
   );
-  root.append(
+  view.append(
     methods,
     recentPanel(d.recent_incidents || []),
     note(
@@ -774,9 +774,9 @@ async function ipDetail(rest) {
   );
 }
 
-async function networks() {
+async function networks(view) {
   setTitle("Networks");
-  clear(root);
+  clear(view);
   const d = await api("asns?limit=50"),
     p = panel("Top sampled networks");
   p.append(
@@ -799,7 +799,7 @@ async function networks() {
       ]),
     ),
   );
-  root.append(
+  view.append(
     p,
     note(d.sample_coverage),
     note(
@@ -807,9 +807,9 @@ async function networks() {
     ),
   );
 }
-async function networkDetail(asn) {
+async function networkDetail(asn, view) {
   setTitle("Network details");
-  clear(root);
+  clear(view);
   const n = await api("asns/" + encodeURIComponent(asn)),
     p = panel(
       "AS" + n.asn + " · " + (n.organization || "Unknown organization"),
@@ -827,7 +827,7 @@ async function networkDetail(asn) {
     kv("Would-block IPs in recent incidents", fmt(n.recent_would_block_ips)),
     kv("Recent sites", (n.recent_sites || []).join(", ") || "—"),
   );
-  root.append(p);
+  view.append(p);
   const ipsPanel = panel("Observed IPs");
   ipsPanel.append(
     table(
@@ -839,7 +839,7 @@ async function networkDetail(asn) {
       ]),
     ),
   );
-  root.append(
+  view.append(
     ipsPanel,
     note(
       "This view covers bounded tracked IP samples and at most 100 recent in-memory incidents, not all traffic on the ASN.",
@@ -847,9 +847,9 @@ async function networkDetail(asn) {
   );
 }
 
-async function httpAnalytics() {
+async function httpAnalytics(view) {
   setTitle("HTTP analytics");
-  clear(root);
+  clear(view);
   const [stats, agents] = await Promise.all([
       api("stats?range=1m"),
       api("user-agents"),
@@ -884,7 +884,7 @@ async function httpAnalytics() {
       "top tracked IP sample",
     ),
   );
-  root.append(cards);
+  view.append(cards);
   const pair = node("div", null, "grid two"),
     methods = panel("Methods"),
     statuses = panel("Statuses");
@@ -914,7 +914,7 @@ async function httpAnalytics() {
     ),
   );
   append(pair, methods, statuses);
-  root.append(pair);
+  view.append(pair);
   const ips = panel("Most 404s among tracked IPs");
   ips.append(
     table(
@@ -931,7 +931,7 @@ async function httpAnalytics() {
         ]),
     ),
   );
-  root.append(ips);
+  view.append(ips);
   const samples = { paths: {}, missing: {}, query: {} };
   for (const item of v.top_ips || []) {
     for (const [field, key] of [
@@ -960,7 +960,7 @@ async function httpAnalytics() {
     );
     sampleGrid.append(p);
   }
-  root.append(sampleGrid);
+  view.append(sampleGrid);
   const agentsPanel = panel("User-Agent samples");
   agentsPanel.append(
     table(
@@ -982,7 +982,7 @@ async function httpAnalytics() {
         ]),
     ),
   );
-  root.append(
+  view.append(
     agentsPanel,
     note(
       agents.sample_coverage +
@@ -991,10 +991,10 @@ async function httpAnalytics() {
   );
 }
 
-async function health() {
+async function health(view) {
   setTitle("Server health");
-  clear(root);
-  rangeControl(root);
+  clear(view);
+  rangeControl(view);
   const [server, stats] = await Promise.all([
       api("server"),
       api("stats?range=" + range),
@@ -1035,7 +1035,7 @@ async function health() {
       "system load",
     ),
   );
-  root.append(cards);
+  view.append(cards);
   if (stats.history?.length) {
     for (const [heading, first, second, labels] of [
       [
@@ -1062,7 +1062,7 @@ async function health() {
         chart(stats.history, [first, second], labels),
         note("Each series uses its own peak. Missing samples appear as gaps."),
       );
-      root.append(p);
+      view.append(p);
     }
   }
   const p = panel("PHP-FPM pools");
@@ -1094,7 +1094,7 @@ async function health() {
       ]),
     ),
   );
-  root.append(
+  view.append(
     p,
     note(
       "Missing measurements remain unavailable; stale PHP-FPM samples are labeled.",
@@ -1102,10 +1102,10 @@ async function health() {
   );
 }
 
-async function phpfpmPage() {
+async function phpfpmPage(view) {
   setTitle("PHP-FPM");
-  clear(root);
-  rangeControl(root);
+  clear(view);
+  rangeControl(view);
   const [data, stats] = await Promise.all([
       api("phpfpm"),
       api("stats?range=" + range),
@@ -1147,7 +1147,7 @@ async function phpfpmPage() {
       "reported by PHP-FPM",
     ),
   );
-  root.append(cards);
+  view.append(cards);
   if (stats.history?.length) {
     const p = panel("Requests and active workers");
     p.append(
@@ -1158,7 +1158,7 @@ async function phpfpmPage() {
       ),
       note("Each series uses its own peak. Missing samples appear as gaps."),
     );
-    root.append(p);
+    view.append(p);
   }
   const p = panel("Pool details");
   p.append(
@@ -1189,7 +1189,7 @@ async function phpfpmPage() {
       ]),
     ),
   );
-  root.append(
+  view.append(
     p,
     note(
       "PHP-FPM is optional. A missing or stale sample is never treated as zero.",
@@ -1197,9 +1197,9 @@ async function phpfpmPage() {
   );
 }
 
-async function incidents() {
+async function incidents(view) {
   setTitle("Incidents");
-  clear(root);
+  clear(view);
   const filters = node("div", null, "toolbar");
   const fields = [
       ["Site", "site"],
@@ -1242,10 +1242,10 @@ async function incidents() {
     );
     incidentFilter.decision = decision.value;
     incidentPage = 1;
-    incidents();
+    render();
   });
   filters.append(search);
-  root.append(filters);
+  view.append(filters);
   const apiFilter = { ...incidentFilter };
   for (const key of ["from", "to"]) {
     if (apiFilter[key]) apiFilter[key] = new Date(apiFilter[key]).toISOString();
@@ -1263,7 +1263,7 @@ async function incidents() {
   );
   if (!d.incidents.length)
     p.append(empty("No incidents in this time range match these filters."));
-  root.append(p);
+  view.append(p);
   const pages = node("div", null, "toolbar"),
     prev = node("button", "Previous"),
     next = node("button", "Next");
@@ -1271,14 +1271,14 @@ async function incidents() {
   next.disabled = !d.next_page;
   prev.addEventListener("click", () => {
     incidentPage--;
-    incidents();
+    render();
   });
   next.addEventListener("click", () => {
     incidentPage++;
-    incidents();
+    render();
   });
   append(pages, prev, node("span", `Page ${incidentPage}`), next);
-  root.append(
+  view.append(
     pages,
     note(
       "Scores and signal evidence are stored at detection time; historical incidents are not rescored.",
@@ -1338,9 +1338,9 @@ function errorSource(event) {
   label.title = source;
   return label;
 }
-async function incidentDetail(id) {
+async function incidentDetail(id, view) {
   setTitle("Incident details");
-  clear(root);
+  clear(view);
   const d = await api("incidents/" + encodeURIComponent(id)),
     i = d.incident;
   const cards = node("div", null, "grid metrics");
@@ -1351,7 +1351,7 @@ async function incidentDetail(id) {
     metric("Requests", fmt(i.requests), "detection window"),
     metric("Peak RPS", fmt(i.peak_rps), "detection window"),
   );
-  root.append(cards);
+  view.append(cards);
   const p = panel("Saved evidence and context");
   append(
     p,
@@ -1369,13 +1369,13 @@ async function incidentDetail(id) {
     kv("ASN", i.asn ? link("AS" + i.asn, "#asn/" + i.asn) : "—"),
     kv("Organization", i.asn_organization || "—"),
   );
-  root.append(p);
+  view.append(p);
   const samples = panel("Sample requests");
   samples.append(note("Up to five requests saved from this incident window. Query strings and raw log lines are omitted."));
   if ((i.request_samples || []).length) samples.append(requestSampleTable(i.request_samples.map(sample => ({sample, incident_id:d.id, server:i.server, score:i.score}))));
   else samples.append(empty("Request samples are unavailable for this incident."));
   samples.append(link("Search incident logs for this site", "#logs/" + encodeURIComponent(i.site_id || "")));
-  root.append(samples);
+  view.append(samples);
   const signals = panel("Detector signals");
   (i.signals || []).forEach((s) => {
     const x = node("div", null, "kv");
@@ -1389,7 +1389,7 @@ async function incidentDetail(id) {
     );
     signals.append(x);
   });
-  root.append(signals);
+  view.append(signals);
   const response = panel("HTTP and server impact");
   append(
     response,
@@ -1421,7 +1421,7 @@ async function incidentDetail(id) {
     ),
     kv("Evidence incomplete", (i.evidence_incomplete || []).join(", ") || "No"),
   );
-  root.append(response);
+  view.append(response);
   const errorPanel = panel("Saved error correlation");
   if (!i.errors) errorPanel.append(note("Error context unavailable for this historical incident."));
   else {
@@ -1429,7 +1429,7 @@ async function incidentDetail(id) {
     errorPanel.append(table(["Time", "Source", "Category", "Association", "Message"], (i.errors.samples || []).map(x => [when(x.event.timestamp), errorSource(x.event), x.event.category, x.method.replaceAll("_", " ") + (x.uncertain ? " (uncertain)" : " (shared log ID)"), x.event.message]), "error-table"));
     errorPanel.append(note("An association is evidence to inspect; it does not prove that the client caused a failure."));
   }
-  root.append(errorPanel);
+  view.append(errorPanel);
   if (i.php_fpm?.length) {
     const php = panel("Saved PHP-FPM state");
     php.append(
@@ -1456,9 +1456,9 @@ async function incidentDetail(id) {
         ]),
       ),
     );
-    root.append(php);
+    view.append(php);
   }
-  root.append(
+  view.append(
     note(
       "This is the historical detection snapshot, not the IP's current state.",
     ),
@@ -1470,23 +1470,26 @@ async function render({background = false} = {}) {
     route = current(),
     parts = route.split("/"),
     page = parts[0];
+  const view = node("div");
   if (page === "overview") overviewPending++;
   try {
     if (page === "overview") await overview(generation, background);
-    else if (page === "sites") await sites();
+    else if (page === "sites") await sites(view);
     else if (page === "site")
-      await siteDetail(decodeURIComponent(parts.slice(1).join("/")));
-    else if (page === "ips") await ips();
-    else if (page === "ip") await ipDetail(parts.slice(1).join("/"));
-    else if (page === "networks") await networks();
-    else if (page === "asn") await networkDetail(parts[1]);
-    else if (page === "http") await httpAnalytics();
-    else if (page === "health") await health();
-    else if (page === "phpfpm") await phpfpmPage();
-    else if (page === "logs") await requestLogs(parts.length > 1 ? decodeURIComponent(parts.slice(1).join("/")) : undefined);
-    else if (page === "incidents") await incidents();
-    else if (page === "incident") await incidentDetail(parts[1]);
-    else error("Unknown dashboard section");
+      await siteDetail(decodeURIComponent(parts.slice(1).join("/")), view);
+    else if (page === "ips") await ips(view);
+    else if (page === "ip") await ipDetail(parts.slice(1).join("/"), view);
+    else if (page === "networks") await networks(view);
+    else if (page === "asn") await networkDetail(parts[1], view);
+    else if (page === "http") await httpAnalytics(view);
+    else if (page === "health") await health(view);
+    else if (page === "phpfpm") await phpfpmPage(view);
+    else if (page === "logs") await requestLogs(parts.length > 1 ? decodeURIComponent(parts.slice(1).join("/")) : undefined, view);
+    else if (page === "incidents") await incidents(view);
+    else if (page === "incident") await incidentDetail(parts[1], view);
+    else throw new Error("Unknown dashboard section");
+    if (page !== "overview" && generation === renderGeneration && current() === route)
+      root.replaceChildren(...view.childNodes);
   } catch (e) {
     if (generation === renderGeneration) {
       if (page === "overview" && overviewVisible()) {
@@ -1538,8 +1541,8 @@ function requestSampleTable(items) {
   return [when(r.timestamp),x.server || "—",r.site_id,link(r.client_ip,"#ip/"+encodeURIComponent(r.client_ip)),r.method,r.path,fmt(r.status),r.request_ms===undefined?"Unavailable":fmt(r.request_ms)+" ms",r.request_id||"—",link("#"+x.incident_id+" · score "+fmt(x.score),"#incident/"+x.incident_id)];
  }),"error-table");
 }
-async function requestLogs(site) {
- setTitle("Incident logs");clear(root);
+async function requestLogs(site, view) {
+ setTitle("Incident logs");clear(view);
  const generation=++sampleGeneration, route=current();
  if(site!==undefined && sampleRouteSite!==site) {sampleFilter.site=site;samplePage=1;}
  if(site!==undefined || current()==="logs")sampleRouteSite=site;
@@ -1548,12 +1551,12 @@ async function requestLogs(site) {
   const input=node("input");input.placeholder=label;input.setAttribute("aria-label",label);input.value=sampleFilter[key];if(key==="from"||key==="to")input.type="datetime-local";inputs[key]=input;input.title=label;
   if(key==="from"||key==="to")filters.append(append(node("label",label),input));else filters.append(input);
  }
- const search=node("button","Search");search.addEventListener("click",()=>{for(const key of Object.keys(inputs))sampleFilter[key]=inputs[key].value.trim();samplePage=1;requestLogs();});filters.append(search);
- root.append(note("Only requests saved with incidents appear here: up to five per incident. Ten incidents contain at most fifty samples. Overlapping incidents may include the same request."),filters);
+ const search=node("button","Search");search.addEventListener("click",()=>{for(const key of Object.keys(inputs))sampleFilter[key]=inputs[key].value.trim();samplePage=1;render();});filters.append(search);
+ view.append(note("Only requests saved with incidents appear here: up to five per incident. Ten incidents contain at most fifty samples. Overlapping incidents may include the same request."),filters);
  const filter={...sampleFilter};for(const key of ["from","to"])if(filter[key])filter[key]=new Date(filter[key]).toISOString();
  const d=await api("request-samples?"+query({...filter,page:samplePage,limit:50}));
  if(generation!==sampleGeneration || current()!==route)return;
- const p=panel("Saved requests · "+fmt(d.total)+" matches");p.append(requestSampleTable(d.samples));if(!d.samples.length)p.append(empty("No saved request samples match. Older incidents may not contain request samples."));root.append(p);
- const prev=node("button","Previous"),next=node("button","Next");prev.disabled=samplePage<=1;next.disabled=!d.next_page;prev.addEventListener("click",()=>{samplePage--;requestLogs();});next.addEventListener("click",()=>{samplePage++;requestLogs();});
- root.append(append(node("div",null,"toolbar"),prev,node("span","Page "+samplePage),next),note("Time filters use incident detection time. Without dates, this view searches the last four days, subject to configured retention."));
+ const p=panel("Saved requests · "+fmt(d.total)+" matches");p.append(requestSampleTable(d.samples));if(!d.samples.length)p.append(empty("No saved request samples match. Older incidents may not contain request samples."));view.append(p);
+ const prev=node("button","Previous"),next=node("button","Next");prev.disabled=samplePage<=1;next.disabled=!d.next_page;prev.addEventListener("click",()=>{samplePage--;render();});next.addEventListener("click",()=>{samplePage++;render();});
+ view.append(append(node("div",null,"toolbar"),prev,node("span","Page "+samplePage),next),note("Time filters use incident detection time. Without dates, this view searches the last four days, subject to configured retention."));
 }

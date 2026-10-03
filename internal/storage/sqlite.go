@@ -36,7 +36,11 @@ type Store struct {
 	queue             chan writeRequest
 	done              chan struct{}
 	mu                sync.Mutex
+	submitMu          sync.RWMutex  // Prevent close while a barrier is being enqueued.
+	durableGate       chan struct{} // Serialize durable completion with checkpoints.
 	closed            bool
+	writeLoss         error // Sticky until restart: rejected data must be replayed.
+	workerError       error
 	retention         config.RetentionConfig
 	opMu              sync.RWMutex
 	operational       interface {
@@ -110,7 +114,7 @@ func Open(path string, diagnostics io.Writer) (*Store, error) {
 		_ = db.Close()
 		return nil, fmt.Errorf("open SQLite dashboard reader: %w", err)
 	}
-	s := &Store{path: path, errorSampleLimit: 20, errorQueue: make(chan model.ErrorEvent, 128), db: db, readDB: readDB, diagnostics: diagnostics, queue: make(chan writeRequest, 256), done: make(chan struct{})}
+	s := &Store{durableGate: make(chan struct{}, 1), path: path, errorSampleLimit: 20, errorQueue: make(chan model.ErrorEvent, 128), db: db, readDB: readDB, diagnostics: diagnostics, queue: make(chan writeRequest, 256), done: make(chan struct{})}
 	go s.run()
 	return s, nil
 }
@@ -293,6 +297,7 @@ func (s *Store) WriteIncident(_ context.Context, incident model.Incident) error 
 	case s.queue <- writeRequest{incident: &incident}:
 		return nil
 	default:
+		s.writeLoss = ErrQueueFull
 		return ErrQueueFull
 	}
 }
@@ -301,16 +306,19 @@ func (s *Store) WriteIncident(_ context.Context, incident model.Incident) error 
 // used before clean watcher offsets advance on shutdown.
 func (s *Store) Flush(ctx context.Context) error {
 	barrier := make(chan error, 1)
+	s.submitMu.RLock()
 	s.mu.Lock()
 	if s.closed {
 		s.mu.Unlock()
+		s.submitMu.RUnlock()
 		return ErrClosed
 	}
+	s.mu.Unlock()
 	select {
 	case s.queue <- writeRequest{barrier: barrier}:
-		s.mu.Unlock()
+		s.submitMu.RUnlock()
 	case <-ctx.Done():
-		s.mu.Unlock()
+		s.submitMu.RUnlock()
 		return ctx.Err()
 	}
 	select {
@@ -331,7 +339,11 @@ func (s *Store) run() {
 		for i := 0; i < count; i++ {
 			select {
 			case e := <-errorQueue:
-				errorBatch = append(errorBatch, e)
+				if len(errorBatch) < 192 {
+					errorBatch = append(errorBatch, e)
+				} else {
+					s.markWriteLoss(ErrQueueFull)
+				}
 			default:
 				return
 			}
@@ -342,20 +354,28 @@ func (s *Store) run() {
 	ticker := time.NewTicker(250 * time.Millisecond)
 	defer ticker.Stop()
 	flush := func() error {
+		_ = s.beginDurable(context.Background())
+		defer s.endDurable()
 		if len(batch) == 0 && len(errorBatch) == 0 {
-			return nil
+			return priorError
 		}
 		var err error
 		if len(batch) > 0 {
 			err = s.insertBatch(batch)
+			if err == nil {
+				batch = batch[:0]
+			}
 		}
 		if len(errorBatch) > 0 {
-			err = errors.Join(err, s.insertErrors(errorBatch))
-			errorBatch = errorBatch[:0]
+			errorErr := s.insertErrors(errorBatch)
+			err = errors.Join(err, errorErr)
+			if errorErr == nil {
+				errorBatch = errorBatch[:0]
+			}
 		}
 		if err != nil {
 			consecutive++
-			priorError = errors.Join(priorError, err)
+			priorError = err
 			fmt.Fprintf(s.diagnostics, "ReqSentry SQLite incident batch failed count=%d: %v\n", len(batch), err)
 			s.opMu.RLock()
 			sink := s.operational
@@ -365,15 +385,22 @@ func (s *Store) run() {
 			}
 		} else {
 			consecutive = 0
+			priorError = nil
 		}
-		batch = batch[:0]
+		s.mu.Lock()
+		s.workerError = priorError
+		s.mu.Unlock()
 		return err
 	}
 	for {
 		select {
 		case e := <-errorQueue:
-			errorBatch = append(errorBatch, e)
-			if len(errorBatch) >= 64 {
+			if len(errorBatch) < 192 {
+				errorBatch = append(errorBatch, e)
+			} else {
+				s.markWriteLoss(ErrQueueFull)
+			}
+			if len(errorBatch) >= 64 && priorError == nil {
 				_ = flush()
 			}
 		case request, ok := <-s.queue:
@@ -385,18 +412,44 @@ func (s *Store) run() {
 			if request.barrier != nil {
 				drainErrors()
 				_ = flush()
-				request.barrier <- priorError
-				priorError = nil
+				s.mu.Lock()
+				request.barrier <- errors.Join(priorError, s.writeLoss)
+				s.mu.Unlock()
 				continue
 			}
-			batch = append(batch, *request.incident)
-			if len(batch) == cap(batch) {
+			if len(batch) < 320 {
+				batch = append(batch, *request.incident)
+			} else {
+				s.markWriteLoss(ErrQueueFull)
+			}
+			if len(batch) >= 64 && priorError == nil {
 				_ = flush()
 			}
 		case <-ticker.C:
 			_ = flush()
 		}
 	}
+}
+
+func (s *Store) beginDurable(ctx context.Context) error {
+	select {
+	case s.durableGate <- struct{}{}:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+}
+func (s *Store) endDurable() { <-s.durableGate }
+
+func (s *Store) markWriteLoss(err error) {
+	s.mu.Lock()
+	if s.writeLoss != nil {
+		s.mu.Unlock()
+		return
+	}
+	s.writeLoss = err
+	s.mu.Unlock()
+	fmt.Fprintf(s.diagnostics, "ReqSentry SQLite retry buffer exhausted; checkpoints suspended until restart/replay: %v\n", err)
 }
 
 func (s *Store) insertBatch(batch []model.Incident) error {
@@ -456,10 +509,27 @@ func (s *Store) insertBatch(batch []model.Incident) error {
 }
 
 func (s *Store) RecentIncidents(ctx context.Context, limit int) ([]model.Incident, error) {
+	return s.FilteredIncidents(ctx, limit, "", "")
+}
+
+// FilteredIncidents applies CLI identity filters before the bounded result limit.
+func (s *Store) FilteredIncidents(ctx context.Context, limit int, ip, site string) ([]model.Incident, error) {
 	if limit < 1 || limit > 1000 {
 		return nil, errors.New("incident limit must be between 1 and 1000")
 	}
-	rows, err := s.readDB.QueryContext(ctx, `SELECT payload_json FROM incidents WHERE timestamp_ns>=? ORDER BY id DESC LIMIT ?`, s.retainedFrom(time.Time{}, "incidents").UnixNano(), limit)
+	query := `SELECT payload_json FROM incidents WHERE timestamp_ns>=?`
+	args := []any{s.retainedFrom(time.Time{}, "incidents").UnixNano()}
+	if ip != "" {
+		query += ` AND ip_address=?`
+		args = append(args, ip)
+	}
+	if site != "" {
+		query += ` AND site_id=?`
+		args = append(args, site)
+	}
+	query += ` ORDER BY id DESC LIMIT ?`
+	args = append(args, limit)
+	rows, err := s.readDB.QueryContext(ctx, query, args...)
 	if err != nil {
 		return nil, err
 	}
@@ -495,6 +565,18 @@ func (s *Store) GetState(ctx context.Context, key string) (string, bool, error) 
 }
 
 func (s *Store) SaveOffset(ctx context.Context, path string, offset Offset) error {
+	if err := s.beginDurable(ctx); err != nil {
+		return err
+	}
+	defer s.endDurable()
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.writeLoss != nil {
+		return s.writeLoss
+	}
+	if s.workerError != nil {
+		return s.workerError
+	}
 	_, err := s.db.ExecContext(ctx, `INSERT INTO watcher_offsets(path,device,inode,byte_offset,updated_at) VALUES(?,?,?,?,?)
 		ON CONFLICT(path) DO UPDATE SET device=excluded.device,inode=excluded.inode,byte_offset=excluded.byte_offset,updated_at=excluded.updated_at`,
 		path, strconv.FormatUint(offset.Device, 10), strconv.FormatUint(offset.Inode, 10), offset.Bytes, time.Now().UTC().Format(time.RFC3339Nano))
@@ -521,15 +603,17 @@ func (s *Store) LoadOffset(ctx context.Context, path string) (Offset, bool, erro
 }
 
 func (s *Store) Close() error {
+	s.submitMu.Lock()
 	s.mu.Lock()
 	if !s.closed {
 		s.closed = true
 		close(s.queue)
 	}
 	s.mu.Unlock()
+	s.submitMu.Unlock()
 	<-s.done
 	readErr := s.readDB.Close()
-	return errors.Join(readErr, s.db.Close())
+	return errors.Join(s.workerError, s.writeLoss, readErr, s.db.Close())
 }
 
 func nullableEventID(value string) any {

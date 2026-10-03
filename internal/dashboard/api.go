@@ -40,7 +40,11 @@ func (s *Server) api(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	q := r.URL.Query()
-	limit, ok := boundedInt(q.Get("limit"), 20, 1, 50)
+	maxLimit := 50
+	if parts[0] == "incidents" {
+		maxLimit = 100
+	}
+	limit, ok := boundedInt(q.Get("limit"), 20, 1, maxLimit)
 	if !ok {
 		badQuery(w)
 		return
@@ -470,7 +474,7 @@ func (s *Server) incidentAPI(w http.ResponseWriter, r *http.Request, parts []str
 		badQuery(w)
 		return
 	}
-	page, ok := boundedInt(q.Get("page"), 1, 1, 101)
+	page, ok := boundedInt(q.Get("page"), 1, 1, 10001)
 	if !ok {
 		badQuery(w)
 		return
@@ -534,7 +538,7 @@ func (s *Server) incidentAPI(w http.ResponseWriter, r *http.Request, parts []str
 		return
 	}
 	var nextPage *int
-	if page*limit < total {
+	if page*limit < total && page*limit <= 10000 {
 		value := page + 1
 		nextPage = &value
 	}

@@ -1,6 +1,6 @@
 # Product review notes
 
-**Prepared 3 October 2026.** ReqSentry is ready for a monitor-only product demonstration and implementation review. Production acceptance remains open under [ticket 021](../Tickets/021-replay-validation.md).
+**Prepared 3 October 2026.** ReqSentry is ready for a monitor-only product demonstration and implementation review. Production acceptance remains open under [production validation](validation.md).
 
 Start with the [README](../README.md) and its 40-second walkthrough. For an interactive review, run `python3 scripts/demo.py --duration 900` from the repository root and open `http://localhost:18092`. The [demo guide](demo.md) describes the fixture and a suggested investigation route.
 
@@ -46,9 +46,15 @@ Pattern checks do not establish that every possible secret format has been revie
 
 ## Remaining acceptance work
 
-1. Replay representative logs from the intended sites and review suspicious incidents against normal API, browser, and crawler traffic. Record tuning and false-positive findings under ticket 021.
+1. Replay representative logs from the intended sites and review suspicious incidents against normal API, browser, and crawler traffic. Record tuning and false-positive findings in the production validation checklist.
 2. Run sustained monitoring on the intended Linux host, measuring CPU, peak memory, watcher lag, queue failures, dropped events, rotation/restart behavior, and concurrent dashboard use.
 3. Smoke-test the intended Slack destination, Teams Workflow, and SNS topic/subscriber. Automated tests verify provider contracts with fake transports; this review sent no external notifications.
 4. Resolve the old domain labels in Git history before public release if those associations should remain private. The project's MIT license is now included at the repository root.
 
 V1 remains monitor-only throughout review. `WOULD_BLOCK` records a decision for investigation and takes no enforcement action.
+
+## Engine and CLI review
+
+The README leads with the monitoring engine, readable IP reports and local operations; dashboard media remains in the optional UI section. CLI reports accept IP/site filters and signal/request details, with `-json` retained for scripts. Maintenance includes scoped data preview/confirmed cleanup, configured MaxMind checks, notification tests (including legacy `output.slack`) and persistent UI toggles with restart instructions. The offline notification preview uses the actual formatter; no Slack screenshot or live delivery is claimed.
+
+Race-checked process tests run the engine with the UI disabled, append synthetic requests, observe scored JSONL output and CLI findings, and verify that cleanup refuses a live engine. A second run verifies file output continues with SQLite unavailable. Cleanup fixtures cover confirmation, database/output scope, archives/quarantine, protected inputs, symlinks/hardlinks and fresh legacy heartbeats. UI tests preserve the complete commented config, access policy and permissions. Live production load and provider receipt checks remain open.

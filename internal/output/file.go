@@ -104,7 +104,7 @@ func (f *File) run() {
 			return
 		}
 		if active == nil && earliest.IsZero() {
-			lo, hi, err := f.retention.pruneFile(f.path, now)
+			lo, hi, err := f.retention.prepare(f.path, now, f.diagnostics)
 			if err != nil {
 				fmt.Fprintf(f.diagnostics, "ReqSentry output retention failed path=%s: %v\n", f.path, err)
 			} else {
@@ -169,7 +169,7 @@ func (f *File) run() {
 		}
 		if active == nil {
 			if f.retention != nil {
-				lo, hi, err := f.retention.pruneFile(f.path, now)
+				lo, hi, err := f.retention.prepare(f.path, now, f.diagnostics)
 				if err != nil {
 					fmt.Fprintf(f.diagnostics, "ReqSentry output retention failed path=%s: %v\n", f.path, err)
 					continue

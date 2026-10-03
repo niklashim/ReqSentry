@@ -141,3 +141,14 @@ func TestWebDefaultsAndValidation(t *testing.T) {
 		})
 	}
 }
+
+func TestValidatorRejectsEffectiveAllowAllRanges(t *testing.T) {
+	for _, value := range []string{"0.0.0.0/0", "::/0", "::ffff:0.0.0.0/96"} {
+		if err := validateIPRange(value); err == nil {
+			t.Fatalf("accepted %s", value)
+		}
+	}
+	if err := validateIPRange("::ffff:192.0.2.99/120"); err != nil {
+		t.Fatal(err)
+	}
+}

@@ -44,9 +44,9 @@ func TestOperatorCommands(t *testing.T) {
 		want string
 	}{
 		{[]string{"-config", configPath, "config", "test"}, "configuration valid"},
-		{[]string{"-config", configPath, "status"}, "\"running\": true"},
-		{[]string{"-config", configPath, "report"}, "[]"},
-		{[]string{"-config", configPath, "replay", logPath}, "\"summary\""},
+		{[]string{"-config", configPath, "-json", "status"}, "\"running\": true"},
+		{[]string{"-config", configPath, "-json", "report"}, "[]"},
+		{[]string{"-config", configPath, "-json", "replay", logPath}, "\"summary\""},
 	} {
 		var stdout, stderr bytes.Buffer
 		if code := run(testcase.args, &stdout, &stderr); code != 0 || !strings.Contains(stdout.String(), testcase.want) {

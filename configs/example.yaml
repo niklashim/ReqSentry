@@ -388,6 +388,8 @@ database:
 #       # dashboard_url: https://reqsentry.example.com
 
 # --- Read-only dashboard and searchable incident samples (opt-in) ---
+# The engine, CLI reports, and notifications work with this feature disabled.
+# reqsentry ... ui enable / ui disable saves this setting; restart to apply.
 # Disabled by default. Shows up to five saved requests per incident; it does
 # not index every input log entry. See docs/dashboard.md and docs/incident-logs.md.
 # listen must be an IP literal; port: 1 to 65535. Example access policy below

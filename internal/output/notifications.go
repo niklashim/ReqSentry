@@ -453,6 +453,9 @@ func snsSender(client snsPublisher, c config.DestinationConfig) sender {
 			ctx.Samples = append([]model.ErrorMatch(nil), ctx.Samples...)
 			for i := range ctx.Samples {
 				ctx.Samples[i].Event.StackTrace = ""
+				// Remote notifications carry correlation metadata, never arbitrary
+				// application diagnostics (which may contain unrecognized secrets).
+				ctx.Samples[i].Event.Message = ""
 			}
 			copy.Errors = &ctx
 			e.Incident = &copy

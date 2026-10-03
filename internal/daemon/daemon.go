@@ -533,8 +533,9 @@ func (d *Daemon) monitorAnalysis(ctx context.Context, rollup *aggregator.Aggrega
 	if window <= 0 {
 		window = 30 * time.Second
 	}
-	ticker := time.NewTicker(window)
-	defer ticker.Stop()
+	next := time.Now().Truncate(window).Add(window)
+	timer := time.NewTimer(time.Until(next))
+	defer timer.Stop()
 	if d.trigger.Active() {
 		d.analyzeOnce(rollup, scorer, time.Now())
 	}
@@ -542,13 +543,34 @@ func (d *Daemon) monitorAnalysis(ctx context.Context, rollup *aggregator.Aggrega
 		select {
 		case <-ctx.Done():
 			return
-		case <-ticker.C:
+		case <-timer.C:
+			if d.trigger.Active() {
+				d.analyzeClosedWindow(rollup, scorer, next)
+			}
+			next = time.Now().Truncate(window).Add(window)
+			timer.Reset(time.Until(next))
 		case <-wake:
-		}
-		if d.trigger.Active() {
-			d.analyzeOnce(rollup, scorer, time.Now())
+			if d.trigger.Active() {
+				d.analyzeOnce(rollup, scorer, time.Now())
+			}
 		}
 	}
+
+}
+
+// A scheduled tick belongs to the window that just ended, not the newly
+// opened second. Using an inclusive new-second endpoint would miss the first
+// second of each completed window. Startup/trigger/shutdown may still request
+// a rolling partial window through analyzeOnce.
+func (d *Daemon) analyzeClosedWindow(rollup *aggregator.Aggregator, scorer *scoring.Engine, at time.Time) {
+	if !d.recoveryActive {
+		window := d.config.Analysis.Window.Duration
+		if window <= 0 {
+			window = 30 * time.Second
+		}
+		at = at.Truncate(window).Add(-time.Nanosecond)
+	}
+	d.analyzeOnce(rollup, scorer, at)
 }
 
 func (d *Daemon) analyzeOnce(rollup *aggregator.Aggregator, scorer *scoring.Engine, now time.Time) {
@@ -569,15 +591,11 @@ func (d *Daemon) analyzeOnce(rollup *aggregator.Aggregator, scorer *scoring.Engi
 	allRequests := rollup.TotalRequests(window, now)
 	health, _ := d.Health()
 	pools := d.PHPFPM()
-	for _, identity := range rollup.ActiveIdentities(window, now) {
-		snapshot, ok := rollup.Snapshot(identity.SiteID, identity.ClientIP, window, now)
-		if !ok || snapshot.Requests == 0 {
-			continue
-		}
+	for snapshot, siteCount := range rollup.AnalysisSnapshots(window, now) {
 		signals := detector.HTTPWithRules(snapshot, d.config.Detection)
-		if identity.SiteID == "" {
+		if snapshot.SiteID == "" {
 			signals = append(signals, detector.ImpactWithRules(snapshot, allRequests,
-				rollup.SiteCount(identity.ClientIP, window, now), health, pools, d.config.Detection)...)
+				siteCount, health, pools, d.config.Detection)...)
 		}
 		if len(signals) == 0 {
 			continue
@@ -586,11 +604,11 @@ func (d *Daemon) analyzeOnce(rollup *aggregator.Aggregator, scorer *scoring.Engi
 		var enrichmentResult enrichment.Result
 		if d.enricher != nil {
 			var lookupErr error
-			enrichmentResult, lookupErr = d.enricher.Lookup(identity.ClientIP)
+			enrichmentResult, lookupErr = d.enricher.Lookup(snapshot.ClientIP)
 			switch {
 			case lookupErr != nil:
 				status = "lookup_error"
-				d.logger.Printf("MaxMind lookup failed ip=%s: %v", identity.ClientIP, lookupErr)
+				d.logger.Printf("MaxMind lookup failed ip=%s: %v", snapshot.ClientIP, lookupErr)
 			case !enrichmentResult.Available:
 				status = "unavailable"
 			case !enrichmentResult.Found:

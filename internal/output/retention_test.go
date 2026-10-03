@@ -133,3 +133,86 @@ func TestRetentionMalformedOrOversizedDataIsVisibleAndAtomic(t *testing.T) {
 		t.Fatal("accepted oversized line")
 	}
 }
+
+func TestTruncatedAndMalformedFilesQuarantinedWithoutDisablingWrites(t *testing.T) {
+	for _, bad := range []string{`{"timestamp":`, "invalid JSON\n"} {
+		t.Run(bad, func(t *testing.T) {
+			now := time.Now()
+			path := filepath.Join(t.TempDir(), "incidents.jsonl")
+			original := append(datedJSON(now.Add(-time.Minute), "existing"), []byte(bad)...)
+			if err := os.WriteFile(path, original, 0600); err != nil {
+				t.Fatal(err)
+			}
+			f := NewRetainedFile(path, io.Discard, 96*time.Hour, "incidents")
+			if err := f.Enqueue(datedJSON(now, "new")); err != nil {
+				t.Fatal(err)
+			}
+			f.Close()
+			current, err := os.ReadFile(path)
+			if err != nil || !bytes.Contains(current, []byte("new")) {
+				t.Fatalf("writer disabled: %s %v", current, err)
+			}
+			names, _ := filepath.Glob(path + ".reqsentry.*.quarantine")
+			if len(names) != 1 {
+				t.Fatalf("quarantine missing: %v", names)
+			}
+			preserved, _ := os.ReadFile(names[0])
+			if !bytes.Equal(preserved, original) {
+				t.Fatal("damaged evidence changed")
+			}
+			r := fileRetention{96 * time.Hour, "incidents"}
+			if err := r.pruneArchives(path, now.Add(97*time.Hour)); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := os.Stat(names[0]); !os.IsNotExist(err) {
+				t.Fatal("quarantine outlived retention")
+			}
+		})
+	}
+}
+
+func TestCorruptFileDoesNotExtendExpiredEvidence(t *testing.T) {
+	now := time.Now()
+	path := filepath.Join(t.TempDir(), "incidents.jsonl")
+	original := append([]byte("invalid JSON\n"), datedJSON(now.Add(-97*time.Hour), "expired")...)
+	os.WriteFile(path, original, 0600)
+	f := NewRetainedFile(path, io.Discard, 96*time.Hour, "incidents")
+	f.Enqueue(datedJSON(now, "new"))
+	f.Close()
+	names, _ := filepath.Glob(path + ".reqsentry.*.quarantine")
+	if len(names) != 0 {
+		t.Fatal("expired dated evidence quarantined beyond its ceiling")
+	}
+}
+
+func TestQuarantineRespectsDecreasedRetentionAndOversizedOldEvidence(t *testing.T) {
+	now := time.Now()
+	path := filepath.Join(t.TempDir(), "incidents.jsonl")
+	original := append(datedJSON(now.Add(-2*time.Hour), "recent"), []byte("broken\n")...)
+	os.WriteFile(path, original, 0600)
+	r := fileRetention{96 * time.Hour, "incidents"}
+	if _, _, err := r.prepare(path, now); err != nil {
+		t.Fatal(err)
+	}
+	names, _ := filepath.Glob(path + ".reqsentry.*.quarantine")
+	if len(names) != 1 {
+		t.Fatal("quarantine missing")
+	}
+	r.age = time.Hour
+	if err := r.pruneArchives(path, now); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(names[0]); !os.IsNotExist(err) {
+		t.Fatal("shorter policy did not expire quarantine")
+	}
+	original = append([]byte(strings.Repeat("x", 2<<20)+"\n"), datedJSON(now.Add(-97*time.Hour), "expired")...)
+	os.WriteFile(path, original, 0600)
+	r.age = 96 * time.Hour
+	if _, _, err := r.prepare(path, now); err != nil {
+		t.Fatal(err)
+	}
+	names, _ = filepath.Glob(path + ".reqsentry.*.quarantine")
+	if len(names) != 0 {
+		t.Fatal("oversized record extended dated evidence retention")
+	}
+}

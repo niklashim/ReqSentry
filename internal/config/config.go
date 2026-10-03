@@ -4,6 +4,7 @@ package config
 import (
 	"errors"
 	"fmt"
+	"github.com/niklashim/ReqSentry/internal/iprange"
 	"io"
 	"net/netip"
 	"net/url"
@@ -539,20 +540,6 @@ func validateSecretRef(name, env, credential string) error {
 }
 
 func validateIPRange(value string) error {
-	if value == "" {
-		return errors.New("IP or CIDR is empty")
-	}
-	if prefix, err := netip.ParsePrefix(value); err == nil {
-		if prefix.Bits() == 0 {
-			return errors.New("trust-all/allow-all CIDR is not permitted")
-		}
-		if prefix.Addr().Is4In6() && prefix.Bits() < 96 {
-			return errors.New("mapped IPv4 prefix is too broad")
-		}
-		return nil
-	}
-	if _, err := netip.ParseAddr(value); err != nil {
-		return errors.New("expected an IP address or CIDR")
-	}
-	return nil
+	_, err := iprange.Parse(value)
+	return err
 }

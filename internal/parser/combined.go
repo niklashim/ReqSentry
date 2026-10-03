@@ -72,14 +72,19 @@ func Parse(line, site string) (model.RequestEvent, error) {
 	}
 
 	index := base + 7
-	if index < len(fields) && !isExtension(fields[index]) {
+	// Common format ends at bytes. Combined format always has two positional
+	// header fields; their content must never be interpreted as trusted metadata.
+	if index < len(fields) {
+		if len(fields) < index+2 {
+			return event, errors.New("combined log requires referrer and User-Agent")
+		}
 		if fields[index] != "-" {
 			value := fields[index]
 			event.Referrer = &value
 		}
 		index++
 	}
-	if index < len(fields) && !isExtension(fields[index]) {
+	if index < len(fields) {
 		if fields[index] != "-" {
 			value := fields[index]
 			event.UserAgent = &value
@@ -143,15 +148,6 @@ func Parse(line, site string) (model.RequestEvent, error) {
 		}
 	}
 	return event, nil
-}
-
-func isExtension(value string) bool {
-	for _, prefix := range []string{"rid=", "trace=", "host=", "rt=", "rt_us=", "urt=", "peer=", "xff=", "cfip=", "xrealip=", "loc="} {
-		if strings.HasPrefix(value, prefix) {
-			return true
-		}
-	}
-	return false
 }
 
 func parseRequest(request string) (method, path, query string, err error) {

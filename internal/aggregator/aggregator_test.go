@@ -1,6 +1,7 @@
 package aggregator
 
 import (
+	"fmt"
 	"net/netip"
 	"strings"
 	"testing"
@@ -168,5 +169,113 @@ func TestExpiredPathCapacityIsReusedForActiveIP(t *testing.T) {
 	snapshot, ok := rollup.Snapshot("one", ip, 60*time.Second, start.Add(61*time.Second))
 	if !ok || snapshot.UniquePaths != 2 || snapshot.Saturation.Paths || snapshot.Unique404Paths != 2 {
 		t.Fatalf("expired path cap was not reused: %+v", snapshot)
+	}
+}
+
+func TestClosedWindowsSurviveStartupPhaseAndLateTraffic(t *testing.T) {
+	for _, seconds := range []int{1, 30, 31, 60} {
+		for _, phase := range []int{0, 1, 15, 45, 59} {
+			t.Run(fmt.Sprintf("window=%d/phase=%d", seconds, phase), func(t *testing.T) {
+				window := time.Duration(seconds) * time.Second
+				a := New(limits(), window)
+				a.RetainClosedWindows()
+				boundary := time.Unix(1_800_000_000, 0).Truncate(window)
+				ip := netip.MustParseAddr("192.0.2.1")
+				for i := 1; i <= seconds; i++ {
+					a.Observe(request("shop", ip.String(), "/same", 404), false, boundary.Add(-time.Duration(i)*time.Second))
+				}
+				for i := 0; i <= phase; i++ {
+					a.Observe(request("shop", ip.String(), "/current", 200), false, boundary.Add(time.Duration(i)*time.Second))
+				}
+				// A late arrival in the retained closed window is still counted.
+				a.Observe(request("shop", ip.String(), "/late", 404), false, boundary.Add(-time.Second))
+				s, ok := a.Snapshot("shop", ip, window, boundary.Add(-time.Nanosecond))
+				if !ok || s.Requests != uint64(seconds+1) || len(s.RequestSamples) == 0 {
+					t.Fatalf("closed window lost: requests=%d", s.Requests)
+				}
+				if got := a.SiteCount(ip, window, boundary.Add(-time.Nanosecond)); got != 1 {
+					t.Fatalf("sites=%d", got)
+				}
+			})
+		}
+	}
+}
+
+func BenchmarkAnalysisPass(b *testing.B) {
+	for _, clients := range []int{128, 512, 1024, 4096} {
+		b.Run(fmt.Sprint(clients), func(b *testing.B) {
+			cfg := limits()
+			cfg.MaxActiveRecords = 2 * clients
+			a := New(cfg)
+			at := time.Unix(1_800_000_000, 0)
+			for i := range clients {
+				ip := netip.AddrFrom4([4]byte{198, 18, byte(i / 256), byte(i % 256)})
+				a.Observe(request("shop", ip.String(), "/", 404), false, at)
+			}
+			b.ReportAllocs()
+			b.ResetTimer()
+			for range b.N {
+				for _, id := range a.ActiveIdentities(time.Minute, at) {
+					a.Snapshot(id.SiteID, id.ClientIP, time.Minute, at)
+					if id.SiteID == "" {
+						a.SiteCount(id.ClientIP, time.Minute, at)
+					}
+				}
+			}
+		})
+	}
+}
+
+func BenchmarkAnalysisWithIngestion(b *testing.B) {
+	for _, clients := range []int{128, 1024, 4096} {
+		b.Run(fmt.Sprint(clients), func(b *testing.B) {
+			cfg := limits()
+			cfg.MaxActiveRecords = 2 * clients
+			a := New(cfg)
+			at := time.Unix(1_800_000_000, 0)
+			for i := range clients {
+				ip := netip.AddrFrom4([4]byte{198, 18, byte(i / 256), byte(i % 256)})
+				a.Observe(request("shop", ip.String(), "/", 404), false, at)
+			}
+			stop := make(chan struct{})
+			done := make(chan struct{})
+			var observations uint64
+			var maxLatency time.Duration
+			go func() {
+				defer close(done)
+				for {
+					select {
+					case <-stop:
+						return
+					default:
+					}
+					start := time.Now()
+					a.Observe(request("shop", "198.18.0.0", "/", 200), false, at)
+					latency := time.Since(start)
+					if latency > maxLatency {
+						maxLatency = latency
+					}
+					observations++
+				}
+			}()
+			b.ReportAllocs()
+			b.ResetTimer()
+			start := time.Now()
+			for range b.N {
+				for _, id := range a.ActiveIdentities(time.Minute, at) {
+					a.Snapshot(id.SiteID, id.ClientIP, time.Minute, at)
+					if id.SiteID == "" {
+						a.SiteCount(id.ClientIP, time.Minute, at)
+					}
+				}
+				a.Dashboard(time.Minute, at, 10)
+			}
+			b.StopTimer()
+			elapsed := time.Since(start)
+			close(stop)
+			<-done
+			b.ReportMetric(float64(observations)/elapsed.Seconds(), "ingest/s")
+			b.ReportMetric(float64(maxLatency.Microseconds()), "max_ingest_us")
+		})
 	}
 }

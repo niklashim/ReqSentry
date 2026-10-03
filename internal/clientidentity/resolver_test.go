@@ -61,3 +61,14 @@ func TestSingleHeaderAndAllowlist(t *testing.T) {
 		t.Fatalf("IPv4 allowlist failed: %+v allowed=%v", resolved, allowed)
 	}
 }
+
+func TestResolverRejectsMappedAllowAllPolicies(t *testing.T) {
+	for _, cfg := range []config.Config{
+		{Allowlist: []string{"::ffff:0.0.0.0/96"}},
+		{ClientIP: config.ClientIPConfig{TrustedProxies: []string{"::ffff:0.0.0.0/96"}}},
+	} {
+		if _, err := New(cfg); err == nil {
+			t.Fatal("mapped allow-all policy accepted")
+		}
+	}
+}

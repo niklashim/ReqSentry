@@ -20,14 +20,19 @@ var errorRequest = regexp.MustCompile(`request: "([^"]+)"`)
 var connectionID = regexp.MustCompile(`\*(\d+)`)
 var requestID = regexp.MustCompile(`\[R:([^]]+)\]`)
 var errorCode = regexp.MustCompile(`\bAH[0-9]{5}\b`)
-var secretValue = regexp.MustCompile(`(?i)(authorization|password|passwd|token|secret|cookie|api[_-]?key|signature)[=: ]+[^ ,;]+`)
+
+// Free-form diagnostics are not a reliable serialization format. Suppress a
+// complete sensitive record rather than guessing where a header/value ends.
+var sensitiveMessage = regexp.MustCompile(`(?i)(authorization|password|passwd|token|secret|cookie|api[_-]?key|signature)`)
 var urls = regexp.MustCompile(`https?://[^\s"']+`)
 var privatePaths = regexp.MustCompile(`/[^\s"',;]+`)
 var digits = regexp.MustCompile(`[0-9]+`)
 
 func RedactMessage(v string) string {
+	if sensitiveMessage.MatchString(v) {
+		return "<redacted sensitive diagnostic>"
+	}
 	v = urls.ReplaceAllString(v, "<url>")
-	v = secretValue.ReplaceAllString(v, "$1=<redacted>")
 	v = privatePaths.ReplaceAllString(v, "<path>")
 	v = strings.ReplaceAll(strings.ReplaceAll(v, "\r", " "), "\n", " ")
 	if len(v) > 1024 {

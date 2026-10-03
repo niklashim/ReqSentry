@@ -8,6 +8,7 @@ import (
 	"strings"
 
 	"github.com/niklashim/ReqSentry/internal/config"
+	"github.com/niklashim/ReqSentry/internal/iprange"
 	"github.com/niklashim/ReqSentry/internal/model"
 )
 
@@ -109,22 +110,5 @@ func contains(prefixes []netip.Prefix, addr netip.Addr) bool {
 }
 
 func parseRange(value string) (netip.Prefix, error) {
-	if prefix, err := netip.ParsePrefix(value); err == nil {
-		if prefix.Bits() == 0 {
-			return netip.Prefix{}, fmt.Errorf("trust-all/allow-all CIDR is not permitted")
-		}
-		if prefix.Addr().Is4In6() {
-			if prefix.Bits() < 96 {
-				return netip.Prefix{}, fmt.Errorf("mapped IPv4 prefix is too broad")
-			}
-			return netip.PrefixFrom(prefix.Addr().Unmap(), prefix.Bits()-96).Masked(), nil
-		}
-		return prefix.Masked(), nil
-	}
-	addr, err := netip.ParseAddr(value)
-	if err != nil {
-		return netip.Prefix{}, err
-	}
-	addr = addr.Unmap()
-	return netip.PrefixFrom(addr, addr.BitLen()), nil
+	return iprange.Parse(value)
 }

@@ -4,6 +4,7 @@ package aggregator
 
 import (
 	"hash/fnv"
+	"iter"
 	"math"
 	"net/netip"
 	"net/url"
@@ -16,9 +17,9 @@ import (
 	"github.com/niklashim/ReqSentry/internal/model"
 )
 
-// An extra bucket lets minute history close just after the minute boundary
-// without the new second overwriting its first second.
-const bucketCount = 61
+// Retain a full preceding minute plus the current minute and boundary second.
+// Closed-window analysis can run late without new traffic replacing its data.
+const bucketCount = 121
 
 type key struct {
 	site string
@@ -86,18 +87,20 @@ type Identity struct {
 }
 
 type Aggregator struct {
-	sampleSeconds int64
-	mu            sync.Mutex
-	limits        config.AggregationConfig
-	records       map[key]*record
-	totals        [bucketCount]totalBucket
-	siteTotals    map[string]*[bucketCount]totalBucket
-	drops         [bucketCount]totalBucket
-	latest        int64
-	lastPrune     int64
-	dropped       uint64
-	oldEvents     uint64
-	degraded      bool
+	retentionSeconds int64
+	sampleSeconds    int64
+	mu               sync.Mutex
+	limits           config.AggregationConfig
+	records          map[key]*record
+	sitesByIP        map[netip.Addr]map[string]*record
+	totals           [bucketCount]totalBucket
+	siteTotals       map[string]*[bucketCount]totalBucket
+	drops            [bucketCount]totalBucket
+	latest           int64
+	lastPrune        int64
+	dropped          uint64
+	oldEvents        uint64
+	degraded         bool
 }
 
 type totalBucket struct {
@@ -132,7 +135,7 @@ func (m *MethodHTTP) add(other MethodHTTP) {
 }
 
 type record struct {
-	samples          [2]sampleEpoch
+	samples          []sampleEpoch
 	lastSeen         int64
 	lastExpired      int64
 	lastUA           string
@@ -183,7 +186,15 @@ func New(limits config.AggregationConfig, sampleWindow ...time.Duration) *Aggreg
 	if len(sampleWindow) > 0 && sampleWindow[0] >= time.Second && sampleWindow[0] <= time.Minute {
 		seconds = int64(sampleWindow[0] / time.Second)
 	}
-	return &Aggregator{sampleSeconds: seconds, limits: limits, records: make(map[key]*record), siteTotals: make(map[string]*[bucketCount]totalBucket)}
+	return &Aggregator{retentionSeconds: 61, sampleSeconds: seconds, limits: limits, records: make(map[key]*record), sitesByIP: make(map[netip.Addr]map[string]*record), siteTotals: make(map[string]*[bucketCount]totalBucket)}
+}
+
+// RetainClosedWindows reserves an additional minute for recovery analysis.
+// Call before ingestion starts. Rich tracking remains bounded by configured caps.
+func (a *Aggregator) RetainClosedWindows() {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	a.retentionSeconds = bucketCount
 }
 
 // Observe counts every parsed request in the server total. An allowlisted
@@ -197,14 +208,14 @@ func (a *Aggregator) Observe(event model.RequestEvent, allowlisted bool, at time
 	second := at.Unix()
 	a.mu.Lock()
 	defer a.mu.Unlock()
-	if a.latest != 0 && second < a.latest-(bucketCount-1) {
+	if a.latest != 0 && second < a.latest-(a.retentionSeconds-1) {
 		a.oldEvents++
 		return false
 	}
 	if second > a.latest {
 		a.latest = second
 	}
-	if second != a.lastPrune {
+	if second > a.lastPrune {
 		a.prune(second)
 		a.lastPrune = second
 	}
@@ -248,9 +259,20 @@ func (a *Aggregator) Observe(event model.RequestEvent, allowlisted bool, at time
 				paths: make(map[string]uint16), missing: make(map[string]uint16),
 				agents: make(map[string]uint16), queries: make(map[string]uint16), queryIDs: make(map[uint64]uint16), methodPaths: make(map[methodPathKey]int64), pendingRedirects: make(map[string]int64),
 			}
+			epochs := 2
+			if a.retentionSeconds > 61 {
+				epochs = int((a.retentionSeconds-1)/a.sampleSeconds) + 2
+			}
+			rec.samples = make([]sampleEpoch, epochs)
 			a.records[id] = rec
+			if id.site != "" {
+				if a.sitesByIP[id.ip] == nil {
+					a.sitesByIP[id.ip] = make(map[string]*record)
+				}
+				a.sitesByIP[id.ip][id.site] = rec
+			}
 		}
-		rec.add(event, second, a.limits, a.degraded)
+		rec.add(event, second, a.limits, a.degraded, a.retentionSeconds)
 		if !a.degraded && a.sampleSeconds > 0 {
 			rec.sample(requestSample, at, a.sampleSeconds)
 		}
@@ -304,7 +326,10 @@ func (a *Aggregator) Snapshot(site string, ip netip.Addr, window time.Duration, 
 	}
 	a.mu.Lock()
 	defer a.mu.Unlock()
-	a.prune(at.Unix())
+	if at.Unix() > a.lastPrune {
+		a.prune(at.Unix())
+		a.lastPrune = at.Unix()
+	}
 	rec := a.records[key{site: site, ip: ip.Unmap()}]
 	if rec == nil {
 		return result, false
@@ -429,10 +454,7 @@ func (a *Aggregator) SiteCount(ip netip.Addr, window time.Duration, at time.Time
 	defer a.mu.Unlock()
 	cutoff := at.Unix() - seconds + 1
 	count := 0
-	for id, rec := range a.records {
-		if id.site == "" || id.ip != ip.Unmap() {
-			continue
-		}
+	for _, rec := range a.sitesByIP[ip.Unmap()] {
 		for _, b := range rec.buckets {
 			if b.used && b.second >= cutoff && b.second <= at.Unix() && b.requests > 0 {
 				count++
@@ -441,6 +463,28 @@ func (a *Aggregator) SiteCount(ip netip.Addr, window time.Duration, at time.Time
 		}
 	}
 	return count
+}
+
+// AnalysisSnapshots makes one candidate pass for a fixed window. Individual
+// snapshots are copied under short locks; detector/output work in the consumer
+// never holds the ingestion mutex. Site counts use the per-IP index, and pruning
+// runs at most once for this timestamp. No full batch of rich snapshots is kept.
+func (a *Aggregator) AnalysisSnapshots(window time.Duration, at time.Time) iter.Seq2[Snapshot, int] {
+	return func(yield func(Snapshot, int) bool) {
+		for _, id := range a.ActiveIdentities(window, at) {
+			snapshot, ok := a.Snapshot(id.SiteID, id.ClientIP, window, at)
+			if !ok || snapshot.Requests == 0 {
+				continue
+			}
+			sites := 0
+			if id.SiteID == "" {
+				sites = a.SiteCount(id.ClientIP, window, at)
+			}
+			if !yield(snapshot, sites) {
+				return
+			}
+		}
+	}
 }
 
 // ActiveIdentities returns bounded candidates for periodic deep analysis.
@@ -496,15 +540,21 @@ func (a *Aggregator) Prune(at time.Time) {
 
 func (a *Aggregator) prune(second int64) {
 	for id, rec := range a.records {
-		if rec.lastSeen < second-(bucketCount-1) {
+		if rec.lastSeen < second-(a.retentionSeconds-1) {
 			delete(a.records, id)
+			if id.site != "" {
+				delete(a.sitesByIP[id.ip], id.site)
+				if len(a.sitesByIP[id.ip]) == 0 {
+					delete(a.sitesByIP, id.ip)
+				}
+			}
 		}
 	}
 }
 
-func (r *record) add(event model.RequestEvent, second int64, limits config.AggregationConfig, degraded bool) {
+func (r *record) add(event model.RequestEvent, second int64, limits config.AggregationConfig, degraded bool, retentionSeconds int64) {
 	if second > r.lastExpired {
-		r.expireBefore(second - (bucketCount - 1))
+		r.expireBefore(second - (retentionSeconds - 1))
 		r.lastExpired = second
 	}
 	if second > r.lastSeen {

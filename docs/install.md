@@ -1,6 +1,6 @@
 # Linux installation and operation
 
-ReqSentry V1 analyzes access logs in monitor mode. It does not change web server rules, block clients, or modify traffic.
+ReqSentry’s engine and CLI analyze access logs in monitor mode. The dashboard is optional and disabled by default. It does not change web server rules, block clients, or modify traffic.
 
 ## Install
 
@@ -45,7 +45,25 @@ sudo /usr/local/bin/reqsentry -config /etc/reqsentry/config.yaml maxmind status
 sudo /usr/local/bin/reqsentry -config /etc/reqsentry/config.yaml maxmind update
 ```
 
-`status` shows the last daemon heartbeat, active trigger, watched file status, health, aggregate resource state, SQLite and MaxMind availability, and whether Slack was configured successfully. A heartbeat older than 30 seconds is reported as stopped. `report` returns recent incident JSON. `maxmind update` checks the persistent due time, so calling it early does not force another download. MaxMind and Slack are optional; disabling them does not disable local detection.
+`status` shows the last daemon heartbeat, active trigger, watched file status, health, aggregate resource state, SQLite and MaxMind availability, and whether Slack was configured successfully. A heartbeat older than 30 seconds is reported as stopped. `report` lists readable IP findings; add `-ip`, `-site`, or `-details` before the command to investigate a client/site. `-json status`, `-json report`, and `-json replay LOG...` retain machine-readable output for scripts. `maxmind update` checks the persistent due time, so calling it early does not force another download. MaxMind and Slack are optional; disabling them does not disable local detection.
+
+The [CLI operations guide](cli.md) covers all commands, cleanup scope, and credential handling. UI switches save configuration; restart the service to apply. Operator notification/MaxMind commands need the configured secrets in their own environment or credential directory.
+
+```sh
+# Use the account that owns runtime state for database commands:
+sudo -u reqsentry reqsentry -config /etc/reqsentry/config.yaml data preview
+sudo reqsentry -config /etc/reqsentry/config.yaml ui enable
+sudo systemctl restart reqsentry
+sudo reqsentry -config /etc/reqsentry/config.yaml ui disable
+sudo systemctl restart reqsentry
+# Offline mock, then an explicit test after configuring a destination:
+reqsentry -config /etc/reqsentry/config.yaml notifications preview
+reqsentry -config /etc/reqsentry/config.yaml notifications test legacy-slack
+# Clear collected history and configured ReqSentry output, preserving input logs:
+sudo systemctl stop reqsentry
+sudo -u reqsentry reqsentry -config /etc/reqsentry/config.yaml -confirm data clean
+sudo systemctl start reqsentry
+```
 
 ## Access-log formats and site verification
 
@@ -58,4 +76,4 @@ reqsentry replay /path/to/access.log
 reqsentry -config /etc/reqsentry/config.yaml replay /var/log/nginx/site1.access.log /var/log/apache2/site2.access.log
 ```
 
-Replay emits incident JSON lines followed by a summary. If no configuration exists at the default path, it uses safe built-in monitor defaults and derives the site ID from the filename. With several files, it merges their parsed events by timestamp so cross-site rules can run. Keep access to production logs and replay output restricted because incidents contain IP addresses and request evidence.
+Replay emits readable findings followed by a summary; add `-json` before `replay` for incident JSON lines and a final JSON summary. If no configuration exists at the default path, it uses safe built-in monitor defaults and derives the site ID from the filename. With several files, it merges their parsed events by timestamp so cross-site rules can run. Keep access to production logs and replay output restricted because incidents contain IP addresses and request evidence.

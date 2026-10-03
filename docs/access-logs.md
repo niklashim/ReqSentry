@@ -2,7 +2,7 @@
 
 ReqSentry accepts the standard Nginx and Apache combined formats and Apache's common format, plus explicitly configured [JSON and logfmt sources](structured-logs.md). The fields are client IP, ident/user placeholders, bracketed local timestamp, quoted request, final status, response bytes, and (for combined) quoted referrer and User-Agent. Apache virtual-host common lines may prefix the client IP with a host name. Set a stable `site` for each configured file; the logged host is extra context and does not override that site.
 
-For richer timing evidence, append ReqSentry's named fields to combined logs. The parser treats `-` and missing fields as unavailable. Request and upstream timing signals must not run when their fields are unavailable.
+For richer timing evidence, append ReqSentry's named fields after both referrer and User-Agent in combined logs. Keep both quoted header positions, using `"-"` when unavailable. Common logs end at response bytes and do not support appended extensions. Header content such as `"peer=127.0.0.1"` remains ordinary header text. The parser treats `-` and missing fields as unavailable. Request and upstream timing signals must not run when their fields are unavailable.
 
 ## Nginx
 

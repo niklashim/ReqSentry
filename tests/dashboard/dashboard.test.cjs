@@ -59,6 +59,8 @@ function dashboard() {
     incidents: {incidents: []},
     errors: {errors: [], sources: [], timeline: [], coverage: "test error coverage"},
     sites: {sites: []},
+    ips: {ips: []}, asns: {networks: []}, phpfpm: {pools: []},
+    "user-agents": {user_agents: []}, "request-samples": {samples: [], total: 0},
   };
   const context = vm.createContext({
     window, document, location, Node: window.Node, URLSearchParams,
@@ -66,7 +68,8 @@ function dashboard() {
     EventSource: Events,
     fetch: async (url) => {
       requests.push(url);
-      const key = url.split("/").pop().split("?")[0];
+      const endpoint = url.replace("/api/v1/", "").split("?")[0];
+      const key = endpoint;
       if (gates.has(key)) await gates.get(key).promise;
       return {ok: !failures.has(key), status: failures.has(key) ? 503 : 200,
         json: async () => JSON.parse(JSON.stringify(data[key]))};
@@ -74,7 +77,7 @@ function dashboard() {
   });
   vm.runInContext(script, context);
   return {
-    root, document, requests,
+    root, document, requests, data,
     run: (code) => vm.runInContext(code, context),
     advance: (ms) => { now += ms; },
     focus: (element) => { focused = element; },
@@ -82,6 +85,7 @@ function dashboard() {
     count: (key) => requests.filter(url => url.split("/").pop().split("?")[0] === key).length,
     fail: (key) => failures.add(key),
     recover: (key) => failures.delete(key),
+    unhold: (key) => gates.delete(key),
     hold: (key) => {
       let release;
       const promise = new Promise(done => { release = done; });
@@ -198,4 +202,39 @@ test("snapshots during initial loading do not restart requests or lose the lates
   assert.match(h.root.textContent, /Loading dashboard/);
   release(); await flush();
   assert.equal(h.metric("Requests / second"), "10");
+});
+
+for (const [route, endpoint] of [
+  ["sites","sites"], ["ips","ips"], ["networks","asns"],
+  ["http","user-agents"], ["health","server"], ["phpfpm","phpfpm"],
+  ["incidents","incidents"], ["logs","request-samples"],
+  ["site/shop","sites/shop"], ["ip/192.0.2.1","ips/192.0.2.1"],
+  ["asn/64500","asns/64500"], ["incident/1","incidents/1"],
+]) {
+ test(`late ${route} response cannot append to another route`, async () => {
+  const h=dashboard(); await flush();
+  h.data["sites/shop"]={site:{site_id:"shop"}};
+  h.data["ips/192.0.2.1"]={snapshot:{},recent_incidents:[]};
+  h.data["asns/64500"]={asn:64500};
+  h.data["incidents/1"]={id:1,incident:{client_ip:"192.0.2.1",site_id:"shop",signals:[]}};
+  const release=h.hold(endpoint);
+  const pending=h.navigate(route); await flush();
+  await h.navigate(route==="sites"?"incidents":"sites");
+  const content=h.root.innerHTML;
+  release(); await pending; await flush();
+  assert.equal(h.root.innerHTML,content);
+  assert.equal(h.document.getElementById("page-title").textContent,route==="sites"?"Incidents":"Sites");
+ });
+}
+
+test("older incident search cannot overwrite a newer search on the same route",async()=>{
+ const h=dashboard();await flush();await h.navigate("incidents");
+ // Capture response data at request time to model independently reordered responses.
+ const release=h.hold("incidents");
+ h.run('incidentFilter.site="old"');const pending=h.navigate("incidents");await flush();
+ h.unhold("incidents");
+ h.run('incidentFilter.site="new"');await h.navigate("incidents");
+ const current=h.root.innerHTML;release();await pending;await flush();
+ assert.equal(h.root.innerHTML,current);
+ assert.equal(h.root.querySelector('input[aria-label="Site"]').value,"new");
 });

@@ -147,3 +147,50 @@ func TestErrorStormLeavesRequestCountsAndScoresUnchanged(t *testing.T) {
 		t.Fatal("error storm changed traffic or scores")
 	}
 }
+
+func TestDelayedClosedAnalysisMatchesBoundaryScores(t *testing.T) {
+	for _, seconds := range []int{1, 30, 31, 60} {
+		window := time.Duration(seconds) * time.Second
+		cfg := config.Config{Server: config.ServerConfig{Name: "phase-test"}, Database: config.DatabaseConfig{Path: "/tmp/phase-state.db"}, AccessFiles: []config.AccessFile{{Path: "/tmp/phase.log", Site: "shop"}}, Analysis: config.AnalysisConfig{Window: config.Duration{Duration: window}}}
+		if err := cfg.Validate(); err != nil {
+			t.Fatal(err)
+		}
+		boundary := time.Now().Truncate(window)
+		evaluate := func(phase int) []model.Incident {
+			d := New(cfg, log.New(io.Discard, "", 0))
+			d.recoveryActive = true
+			a := aggregator.New(cfg.Aggregation, window)
+			a.RetainClosedWindows()
+			for i := range 300 {
+				at := boundary.Add(-time.Second)
+				a.Observe(model.RequestEvent{Timestamp: at, SiteID: "shop", ClientIP: netip.MustParseAddr("192.0.2.1"), Method: "GET", Path: fmt.Sprintf("/scan/%d", i), Status: 404}, false, at)
+			}
+			for i := 0; i <= phase; i++ {
+				at := boundary.Add(time.Duration(i) * time.Second)
+				a.Observe(model.RequestEvent{Timestamp: at, SiteID: "shop", ClientIP: netip.MustParseAddr("192.0.2.1"), Method: "GET", Path: "/", Status: 200}, false, at)
+			}
+			scorer, err := scoring.New(cfg.Detection)
+			if err != nil {
+				t.Fatal(err)
+			}
+			// Model the same closed target window evaluated after newer buckets arrived.
+			d.analyzeOnce(a, scorer, boundary.Add(time.Millisecond))
+			return d.Incidents()
+		}
+		original := evaluate(0)
+		if len(original) != 2 {
+			t.Fatalf("window=%d baseline=%d", seconds, len(original))
+		}
+		for _, phase := range []int{1, 15, 45, 59} {
+			delayed := evaluate(phase)
+			if len(delayed) != len(original) {
+				t.Fatalf("window=%d phase=%d lost incidents", seconds, phase)
+			}
+			for i, item := range delayed {
+				if item.Score != original[i].Score || item.EventID != original[i].EventID || item.Requests != original[i].Requests || len(item.RequestSamples) != 5 {
+					t.Fatalf("window=%d phase=%d altered evidence: %+v", seconds, phase, item)
+				}
+			}
+		}
+	}
+}

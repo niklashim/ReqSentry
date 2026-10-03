@@ -77,6 +77,15 @@ func (s *Slack) WriteIncident(_ context.Context, incident model.Incident) error 
 	return s.enqueue(key, incident.Timestamp, s.config.Cooldown.Duration, slackMessage{Text: formatIncident(incident, codes)})
 }
 
+// SlackIncidentText returns the same incident text used by outgoing Slack alerts.
+func SlackIncidentText(incident model.Incident) string {
+	codes := make([]string, 0, len(incident.Signals))
+	for _, signal := range incident.Signals {
+		codes = append(codes, signal.Code)
+	}
+	return formatIncident(incident, codes)
+}
+
 func formatIncident(incident model.Incident, codes []string) string {
 	if len(codes) > 4 {
 		codes = codes[:4]

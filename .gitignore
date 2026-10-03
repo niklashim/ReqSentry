@@ -22,12 +22,16 @@ node_modules/
 # Runtime databases, captured logs, and licensed geolocation downloads.
 *.db
 *.db-*
+*.db.lock
 *.sqlite
 *.sqlite-*
+*.sqlite.lock
 *.sqlite3
 *.sqlite3-*
+*.sqlite3.lock
 *.log
 *.log.*
+*.jsonl.lock
 *.mmdb
 # Public, MIT-licensed synthetic fixture needed by the enrichment tests.
 !/internal/enrichment/testdata/GeoIP2-Enterprise.mmdb

@@ -24,6 +24,7 @@ type RecoveryStatus struct {
 }
 
 func (d *Daemon) recover(ctx context.Context, rollup *aggregator.Aggregator) (map[string]storage.Offset, RecoveryStatus, error) {
+	rollup.RetainClosedWindows()
 	status := RecoveryStatus{Enabled: true, State: "ready"}
 	resume := map[string]storage.Offset{}
 	sections := map[string]replay.Section{}

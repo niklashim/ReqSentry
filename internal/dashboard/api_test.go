@@ -3,6 +3,7 @@ package dashboard
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -218,5 +219,55 @@ func TestStreamInitialSnapshot(t *testing.T) {
 	s.Handler().ServeHTTP(w, r)
 	if w.Code != 200 || !strings.Contains(w.Body.String(), "event: snapshot\ndata: ") {
 		t.Fatalf("initial event status=%d body=%s", w.Code, w.Body.String())
+	}
+}
+
+func TestIncidentPaginationReturnsOnlyFollowablePages(t *testing.T) {
+	s := apiFixture(t)
+	// Sufficient rows to reach the final permitted offset at each limit.
+	now := time.Now()
+	// Batch insertion via the normal asynchronous store verifies API/storage agreement.
+	for i := range 10102 {
+		item := model.Incident{EventID: fmt.Sprintf("page-%d", i), Timestamp: now, SiteID: "shop", ClientIP: netip.MustParseAddr("192.0.2.8")}
+		if i%64 == 0 {
+			if err := s.store.Flush(context.Background()); err != nil {
+				t.Fatal(err)
+			}
+		}
+		if err := s.store.WriteIncident(context.Background(), item); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := s.store.Flush(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	for _, limit := range []int{50, 51, 100} {
+		for _, page := range []int{100, 101, 102} {
+			w := get(t, s, fmt.Sprintf("/api/v1/incidents?limit=%d&page=%d", limit, page))
+			if (page-1)*limit > 10000 {
+				if w.Code != 400 {
+					t.Fatal("accepted oversized offset")
+				}
+				continue
+			}
+			if w.Code != 200 {
+				t.Fatalf("limit=%d page=%d: %d %s", limit, page, w.Code, w.Body.String())
+			}
+			var body struct {
+				NextPage *int `json:"next_page"`
+			}
+			if err := json.Unmarshal(w.Body.Bytes(), &body); err != nil {
+				t.Fatal(err)
+			}
+			if body.NextPage != nil {
+				next := get(t, s, fmt.Sprintf("/api/v1/incidents?limit=%d&page=%d", limit, *body.NextPage))
+				if next.Code != 200 {
+					t.Fatalf("unfollowable next page: %d", next.Code)
+				}
+			}
+		}
+	}
+	if w := get(t, s, "/api/v1/sites?limit=51"); w.Code != 400 {
+		t.Fatal("incident limit leaked to other routes")
 	}
 }

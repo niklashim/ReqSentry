@@ -42,11 +42,13 @@ type Collector struct {
 	client *http.Client
 	mu     sync.RWMutex
 	states map[string]State
+	pollMu sync.Mutex
+	now    func() time.Time
 }
 
 func New(cfg config.PHPFPMConfig) *Collector {
 	return &Collector{
-		config: cfg, client: &http.Client{
+		config: cfg, now: time.Now, client: &http.Client{
 			Timeout:       2 * time.Second,
 			Transport:     &http.Transport{Proxy: nil},
 			CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse },
@@ -61,25 +63,52 @@ func (c *Collector) Close() {
 
 // Poll keeps the last good sample on failure and records the failure as stale.
 // One failed pool does not prevent other pools from being sampled.
-func (c *Collector) Poll(ctx context.Context, at time.Time) []State {
-	for _, pool := range c.config.Pools {
-		stats, err := c.fetch(ctx, pool.StatusURL)
-		c.mu.Lock()
-		state := c.states[pool.Name]
-		state.Name = pool.Name
-		if err != nil {
-			state.LastError = err.Error()
-			state.Stale = true
-		} else {
-			state.SampledAt = at
-			state.Stats = &stats
-			state.LastError = ""
-			state.Stale = false
-		}
-		c.states[pool.Name] = state
-		c.mu.Unlock()
+func (c *Collector) Poll(ctx context.Context, _ time.Time) []State {
+	c.pollMu.Lock()
+	defer c.pollMu.Unlock()
+	budget := 2 * time.Second
+	if interval := c.config.Interval.Duration; interval > 0 && interval < budget {
+		budget = interval
 	}
-	return c.States(at)
+	ctx, cancel := context.WithTimeout(ctx, budget)
+	defer cancel()
+	jobs := make(chan config.PHPFPMPoolConfig)
+	var workers sync.WaitGroup
+	// Configuration admits at most sixteen pools. Start one bounded worker per
+	// pool so a healthy endpoint never waits behind failed endpoints.
+	for range min(16, len(c.config.Pools)) {
+		workers.Go(func() {
+			for pool := range jobs {
+				stats, err := c.fetch(ctx, pool.StatusURL)
+				sampledAt := c.now()
+				c.mu.Lock()
+				state := c.states[pool.Name]
+				state.Name = pool.Name
+				if err != nil {
+					state.LastError = err.Error()
+					state.Stale = true
+				} else {
+					state.SampledAt = sampledAt
+					state.Stats = &stats
+					state.LastError = ""
+					state.Stale = false
+				}
+				c.states[pool.Name] = state
+				c.mu.Unlock()
+			}
+		})
+	}
+enqueue:
+	for _, pool := range c.config.Pools {
+		select {
+		case jobs <- pool:
+		case <-ctx.Done():
+			break enqueue
+		}
+	}
+	close(jobs)
+	workers.Wait()
+	return c.States(c.now())
 }
 
 func (c *Collector) States(now time.Time) []State {
