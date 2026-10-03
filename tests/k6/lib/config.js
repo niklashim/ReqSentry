@@ -3,7 +3,7 @@ export const SITE2_URL = (__ENV.SITE2_URL || 'http://reqsentry-web:8082').replac
 export const SITE3_URL = (__ENV.SITE3_URL || 'http://reqsentry-web:8083').replace(/\/$/, '');
 export const SITE4_URL = (__ENV.SITE4_URL || 'http://reqsentry-web:8084').replace(/\/$/, '');
 
-export const sites = ['him.com', 'mycoolshop.se', 'ekstrom.nu', 'wordpress-site.com'];
+export const sites = ['shop.example', 'api.example', 'docs.example', 'blog.example'];
 
 export function baseURL(site) {
   if (site === sites[0]) return SITE1_URL;

@@ -1,1 +1,1 @@
-document.documentElement.dataset.fixture = "mycoolshop.se";
+document.documentElement.dataset.fixture = "api.example";

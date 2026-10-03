@@ -36,7 +36,8 @@ func New(rules config.DetectionConfig) (*Engine, error) {
 func (e *Engine) Evaluate(input Input) model.Incident {
 	snapshot := input.Snapshot
 	incident := model.Incident{
-		Timestamp: snapshot.At, Server: input.Server, SiteID: snapshot.SiteID,
+		RequestSamples: model.CloneRequestSamples(snapshot.RequestSamples),
+		Timestamp:      snapshot.At, Server: input.Server, SiteID: snapshot.SiteID,
 		ClientIP: snapshot.ClientIP, WindowStart: snapshot.At.Add(-snapshot.Window), WindowEnd: snapshot.At,
 		Decision: model.DecisionNormal, RulesetVersion: e.rules.RulesetVersion, MonitorOnly: true,
 		Requests: snapshot.Requests, PeakRPS: snapshot.PeakRPS,
@@ -124,6 +125,7 @@ func (e *Engine) Evaluate(input Input) model.Incident {
 	case incident.Score >= e.rules.WatchScore:
 		incident.Decision = model.DecisionWatch
 	}
+	incident.EnsureEventID()
 	return incident
 }
 

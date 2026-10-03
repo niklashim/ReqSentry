@@ -6,14 +6,17 @@ import (
 	"bufio"
 	"context"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"time"
 
 	"github.com/niklashim/ReqSentry/internal/aggregator"
 	"github.com/niklashim/ReqSentry/internal/clientidentity"
 	"github.com/niklashim/ReqSentry/internal/config"
+	"github.com/niklashim/ReqSentry/internal/correlation"
 	"github.com/niklashim/ReqSentry/internal/detector"
 	"github.com/niklashim/ReqSentry/internal/model"
 	"github.com/niklashim/ReqSentry/internal/parser"
@@ -22,29 +25,58 @@ import (
 )
 
 type Summary struct {
-	Parsed      uint64 `json:"parsed"`
-	BadLines    uint64 `json:"bad_lines"`
-	Allowlisted uint64 `json:"allowlisted"`
-	Dropped     uint64 `json:"dropped"`
-	Incidents   uint64 `json:"incidents"`
+	Sources     map[string]*SourceSummary `json:"sources,omitempty"`
+	ErrorEvents uint64                    `json:"error_events"`
+	Parsed      uint64                    `json:"parsed"`
+	BadLines    uint64                    `json:"bad_lines"`
+	Allowlisted uint64                    `json:"allowlisted"`
+	Dropped     uint64                    `json:"dropped"`
+	Incidents   uint64                    `json:"incidents"`
 }
 
 type source struct {
-	file    *os.File
-	scanner *bufio.Scanner
-	site    string
-	next    model.RequestEvent
-	ready   bool
+	file      *os.File
+	scanner   *bufio.Scanner
+	site      string
+	parser    *parser.Source
+	nextError *model.ErrorEvent
+	stats     *SourceSummary
+	last      time.Time
+	next      model.RequestEvent
+	ready     bool
 }
 
 func (s *source) advance(summary *Summary) error {
 	s.ready = false
+	s.nextError = nil
 	for s.scanner.Scan() {
-		event, err := parser.Parse(s.scanner.Text(), s.site)
+		var event model.RequestEvent
+		var err error
+		if s.parser.File.Kind == "error" {
+			var e model.ErrorEvent
+			e, err = s.parser.ParseError(s.scanner.Text())
+			if err == nil {
+				if minimum := s.parser.File.MinimumSeverity; minimum != "" && parser.SeverityRank(e.Severity) < parser.SeverityRank(minimum) {
+					s.stats.Filtered++
+					continue
+				}
+				event.Timestamp = e.Timestamp
+				e = replayErrorTime(e)
+				s.nextError = &e
+				s.stats.Errors++
+			}
+		} else {
+			event, err = s.parser.Parse(s.scanner.Text())
+		}
 		if err != nil {
 			summary.BadLines++
+			s.stats.BadLines++
 			continue
 		}
+		if !s.last.IsZero() && event.Timestamp.Before(s.last) {
+			return fmt.Errorf("out-of-order timestamp in source %s", s.site)
+		}
+		s.last = event.Timestamp
 		s.next = event
 		s.ready = true
 		return nil
@@ -54,8 +86,20 @@ func (s *source) advance(summary *Summary) error {
 
 // Run merges configured log files by timestamp, then evaluates each closed
 // analysis window with the same rule engine used by the live daemon.
+type Section struct {
+	Offset        int64
+	Length        int64
+	Device, Inode uint64
+}
+
 func Run(ctx context.Context, paths []string, cfg config.Config, emit func(model.Incident) error) (Summary, error) {
-	var summary Summary
+	return RunSections(ctx, paths, cfg, nil, emit, nil, nil)
+}
+
+// RunSections bounds crash recovery to captured file identities and complete-line ranges.
+func RunSections(ctx context.Context, paths []string, cfg config.Config, sections map[string]Section, emit func(model.Incident) error, observe func(model.RequestEvent, bool), observeError func(model.ErrorEvent)) (Summary, error) {
+	summary := Summary{Sources: map[string]*SourceSummary{}}
+	errorsEngine := correlation.New(cfg.Correlation, len(cfg.ErrorFiles) > 0)
 	if len(paths) == 0 {
 		return summary, fmt.Errorf("replay requires at least one access log")
 	}
@@ -67,7 +111,7 @@ func Run(ctx context.Context, paths []string, cfg config.Config, emit func(model
 	if err != nil {
 		return summary, err
 	}
-	rollup := aggregator.New(cfg.Aggregation)
+	rollup := aggregator.New(cfg.Aggregation, cfg.Analysis.Window.Duration)
 	sources := make([]*source, 0, len(paths))
 	for _, path := range paths {
 		file, err := os.Open(path)
@@ -78,20 +122,53 @@ func Run(ctx context.Context, paths []string, cfg config.Config, emit func(model
 			return summary, err
 		}
 		site := ""
-		for _, configured := range cfg.AccessFiles {
+		sourceConfig := SourceConfig(path, cfg)
+		for _, configured := range append(append([]config.AccessFile(nil), cfg.AccessFiles...), cfg.ErrorFiles...) {
 			if configured.Path == path {
 				site = configured.Site
+				sourceConfig = configured
 				break
 			}
 		}
-		if site == "" {
+		if site == "" && sourceConfig.Kind != "error" {
 			site = filepath.Base(path)
 			site = strings.TrimSuffix(site, ".access.log")
 			site = strings.TrimSuffix(site, ".log")
 		}
-		scanner := bufio.NewScanner(file)
+		var reader io.Reader = file
+		if section, ok := sections[path]; ok {
+			info, err := file.Stat()
+			if err != nil {
+				file.Close()
+				for _, prior := range sources {
+					prior.file.Close()
+				}
+				return summary, err
+			}
+			st, ok := info.Sys().(*syscall.Stat_t)
+			if !ok || uint64(st.Dev) != section.Device || st.Ino != section.Inode || section.Offset < 0 || section.Length < 0 || section.Offset+section.Length > info.Size() {
+				file.Close()
+				for _, prior := range sources {
+					prior.file.Close()
+				}
+				return summary, fmt.Errorf("recovery source identity/size changed")
+			}
+			reader = io.NewSectionReader(file, section.Offset, section.Length)
+		}
+		scanner := bufio.NewScanner(reader)
 		scanner.Buffer(make([]byte, 64*1024), 1<<20)
-		s := &source{file: file, scanner: scanner, site: site}
+		sourceConfig.Site = site
+		sourceParser, parseErr := parser.NewSource(sourceConfig, cfg.LogProfiles)
+		if parseErr != nil {
+			_ = file.Close()
+			for _, prior := range sources {
+				_ = prior.file.Close()
+			}
+			return summary, parseErr
+		}
+		stats := &SourceSummary{MissingFields: map[string]uint64{}}
+		summary.Sources[path] = stats
+		s := &source{file: file, scanner: scanner, site: site, parser: sourceParser, stats: stats}
 		if err := s.advance(&summary); err != nil {
 			_ = file.Close()
 			for _, prior := range sources {
@@ -127,6 +204,7 @@ func Run(ctx context.Context, paths []string, cfg config.Config, emit func(model
 			}
 			incident := scorer.Evaluate(scoring.Input{Server: cfg.Server.Name, Snapshot: snapshot, Signals: signals, AllRequests: all})
 			incident.EnrichmentStatus = "disabled"
+			incident.Errors = errorsEngine.Context(incident)
 			if incident.Decision == model.DecisionNormal {
 				continue
 			}
@@ -163,7 +241,35 @@ func Run(ctx context.Context, paths []string, cfg config.Config, emit func(model
 				end = event.Timestamp.Truncate(window).Add(window)
 			}
 		}
+		if sources[selected].nextError != nil {
+			errorsEngine.ObserveError(*sources[selected].nextError)
+			if observeError != nil {
+				observeError(*sources[selected].nextError)
+			}
+			summary.ErrorEvents++
+			if err := sources[selected].advance(&summary); err != nil {
+				return summary, err
+			}
+			continue
+		}
+		errorsEngine.Prune(event.Timestamp)
 		resolved, excluded := resolver.Resolve(event)
+		if observe != nil {
+			observe(resolved, excluded)
+		}
+		errorsEngine.Observe(resolved)
+		sources[selected].stats.Parsed++
+		for _, item := range []struct {
+			name    string
+			missing bool
+		}{{"request_time", resolved.RequestTime == nil}, {"upstream_time", resolved.UpstreamTime == nil}, {"bytes", resolved.Bytes == nil}, {"request_id", resolved.RequestID == ""}} {
+			if item.missing {
+				sources[selected].stats.MissingFields[item.name]++
+			}
+		}
+		if resolved.RequestTime == nil {
+			sources[selected].stats.MissingTiming++
+		}
 		if excluded {
 			summary.Allowlisted++
 		}

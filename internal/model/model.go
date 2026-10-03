@@ -1,3 +1,5 @@
+// Package model defines normalized requests, detection signals, and the
+// immutable incident snapshots shared by the daemon and replay paths.
 package model
 
 import (
@@ -9,6 +11,8 @@ import (
 // RequestEvent is the common input for Nginx and Apache parsers. Optional
 // timing values are pointers so missing measurements cannot look like zero.
 type RequestEvent struct {
+	RequestID      string
+	TraceID        string
 	Timestamp      time.Time
 	SiteID         string
 	ClientIP       netip.Addr
@@ -57,6 +61,9 @@ const (
 // Incident is shared by persistence, local logs, and optional notifications.
 // A decision is informational in V1; it is not an enforcement command.
 type Incident struct {
+	RequestSamples       []RequestSample   `json:"request_samples,omitempty"`
+	EventID              string            `json:"event_id,omitempty"`
+	Errors               *ErrorContext     `json:"errors,omitempty"`
 	Timestamp            time.Time         `json:"timestamp"`
 	Server               string            `json:"server"`
 	SiteID               string            `json:"site_id"`
@@ -114,4 +121,37 @@ type PHPFPMEvidence struct {
 
 type IncidentSink interface {
 	WriteIncident(context.Context, Incident) error
+}
+
+type ErrorEvent struct {
+	Timestamp    time.Time  `json:"timestamp"`
+	IngestedAt   time.Time  `json:"ingested_at"`
+	Source       string     `json:"source"`
+	SiteID       string     `json:"site_id"`
+	Severity     string     `json:"severity"`
+	Category     string     `json:"category"`
+	Code         string     `json:"code,omitempty"`
+	StackTrace   string     `json:"stack_trace,omitempty"`
+	Message      string     `json:"message"`
+	Fingerprint  string     `json:"fingerprint"`
+	ClientIP     netip.Addr `json:"client_ip,omitempty"`
+	Identity     string     `json:"identity"`
+	Path         string     `json:"path,omitempty"`
+	RequestID    string     `json:"request_id,omitempty"`
+	TraceID      string     `json:"trace_id,omitempty"`
+	ConnectionID string     `json:"connection_id,omitempty"`
+}
+type ErrorMatch struct {
+	Event     ErrorEvent `json:"event"`
+	Method    string     `json:"method"`
+	Uncertain bool       `json:"uncertain"`
+}
+type ErrorContext struct {
+	Observed           int            `json:"observed"`
+	Categories         map[string]int `json:"categories"`
+	Associations       map[string]int `json:"associations"`
+	Samples            []ErrorMatch   `json:"samples"`
+	Coverage           string         `json:"coverage"`
+	Dropped            uint64         `json:"dropped"`
+	UnavailableSources []string       `json:"unavailable_sources,omitempty"`
 }

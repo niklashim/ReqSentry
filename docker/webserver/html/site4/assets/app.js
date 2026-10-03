@@ -1,1 +1,1 @@
-document.documentElement.dataset.fixture = "wordpress-site.com";
+document.documentElement.dataset.fixture = "blog.example";

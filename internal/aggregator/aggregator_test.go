@@ -110,6 +110,23 @@ func TestCapsSaturationAndExpiry(t *testing.T) {
 	}
 }
 
+func TestOversizedEvidenceIsDroppedBeforeRichTracking(t *testing.T) {
+	rollup := New(limits())
+	now := time.Unix(1_800_000_000, 0)
+	event := request("one", "192.0.2.1", "/"+strings.Repeat("x", 1024), 404)
+	event.Query = "id=" + strings.Repeat("7", 1024)
+	if !rollup.Observe(event, false, now) {
+		t.Fatal("oversized evidence dropped the request")
+	}
+	snapshot, ok := rollup.Snapshot("one", netip.MustParseAddr("192.0.2.1"), time.Second, now)
+	if !ok || snapshot.Requests != 1 || snapshot.ImportantStatuses[404] != 1 || snapshot.UniquePaths != 0 || snapshot.QueryPatterns != 0 {
+		t.Fatalf("oversized evidence changed basic counters: %+v", snapshot)
+	}
+	if !snapshot.Saturation.Paths || !snapshot.Saturation.MissingPaths || !snapshot.Saturation.QueryPatterns {
+		t.Fatalf("missing saturation labels: %+v", snapshot.Saturation)
+	}
+}
+
 func TestDegradedModeKeepsBasicCountersUnderLoad(t *testing.T) {
 	rollup := New(limits())
 	now := time.Unix(1_800_000_000, 0)

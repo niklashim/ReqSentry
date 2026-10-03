@@ -11,6 +11,7 @@ import (
 	"io"
 	"log"
 	"os"
+	"strings"
 	"sync"
 	"syscall"
 	"time"
@@ -29,25 +30,42 @@ const (
 )
 
 type Status struct {
-	Path      string
-	Site      string
-	Open      bool
-	Parsed    uint64
-	BadLines  uint64
-	IOErrors  uint64
-	LastError string
+	LagBytes         int64
+	ParseErrors      map[string]uint64
+	MissingFields    map[string]uint64
+	Kind             string
+	Format           string
+	Filtered         uint64
+	LastRecordAt     *time.Time
+	LastCheckpointAt *time.Time
+	RecoveryError    string
+	Path             string
+	Site             string
+	Open             bool
+	Parsed           uint64
+	BadLines         uint64
+	IOErrors         uint64
+	LastError        string
 }
 
 type Manager struct {
-	sources     []*source
-	logger      *log.Logger
-	onEvent     func(model.RequestEvent)
-	poll        time.Duration
-	checkpoints *storage.Store
-	afterDrain  func() bool
+	gate             sync.RWMutex
+	sources          []*source
+	logger           *log.Logger
+	onEvent          func(model.RequestEvent)
+	poll             time.Duration
+	checkpoints      *storage.Store
+	afterDrain       func() bool
+	recovery         bool
+	recoveryLookback time.Duration
+	recoveryMaxBytes int64
 }
 
 type source struct {
+	gate           *sync.RWMutex
+	resume         *storage.Offset
+	onError        func(model.ErrorEvent)
+	parser         *parser.Source
 	config         config.AccessFile
 	mu             sync.RWMutex
 	status         Status
@@ -61,6 +79,7 @@ type source struct {
 }
 
 type openLog struct {
+	boundaries      []boundary
 	file            *os.File
 	info            os.FileInfo
 	reader          *bufio.Reader
@@ -75,8 +94,10 @@ func New(files []config.AccessFile, logger *log.Logger, onEvent func(model.Reque
 	m := &Manager{logger: logger, onEvent: onEvent, poll: defaultPollInterval}
 	for _, file := range files {
 		m.sources = append(m.sources, &source{
+			gate:    &m.gate,
+			parser:  sourceParser(file, nil),
 			config:  file,
-			status:  Status{Path: file.Path, Site: file.Site},
+			status:  Status{ParseErrors: map[string]uint64{}, MissingFields: map[string]uint64{}, Path: file.Path, Site: file.Site, Kind: file.Kind, Format: file.Format},
 			logger:  logger,
 			onEvent: onEvent,
 		})
@@ -111,6 +132,20 @@ func (m *Manager) Run(ctx context.Context) {
 }
 
 func (m *Manager) CommitOffsets() {
+	m.gate.Lock()
+	defer m.gate.Unlock()
+	if m.recovery && m.checkpoints != nil {
+		offsets, err := m.safeOffsets(time.Now(), m.recoveryLookback, m.recoveryMaxBytes)
+		if err == nil {
+			ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+			err = m.checkpoints.SaveOffsets(ctx, offsets)
+			cancel()
+		}
+		if err != nil {
+			m.logger.Print("clean recovery checkpoint deferred; prior safe offsets retained")
+		}
+		return
+	}
 	for _, source := range m.sources {
 		if source.active != nil {
 			source.saveCheckpoint(source.active, source.active.committedOffset)
@@ -122,7 +157,16 @@ func (m *Manager) Status() []Status {
 	result := make([]Status, 0, len(m.sources))
 	for _, s := range m.sources {
 		s.mu.RLock()
-		result = append(result, s.status)
+		item := s.status
+		item.ParseErrors = map[string]uint64{}
+		for k, v := range s.status.ParseErrors {
+			item.ParseErrors[k] = v
+		}
+		item.MissingFields = map[string]uint64{}
+		for k, v := range s.status.MissingFields {
+			item.MissingFields[k] = v
+		}
+		result = append(result, item)
 		s.mu.RUnlock()
 	}
 	return result
@@ -137,7 +181,9 @@ func (s *source) run(ctx context.Context, poll time.Duration) {
 		select {
 		case <-ctx.Done():
 			// Drain complete lines already written before shutdown.
+			s.gate.RLock()
 			s.drainAll()
+			s.gate.RUnlock()
 			return
 		case <-ticker.C:
 			s.step()
@@ -146,6 +192,8 @@ func (s *source) run(ctx context.Context, poll time.Duration) {
 }
 
 func (s *source) step() {
+	s.gate.RLock()
+	defer s.gate.RUnlock()
 	info, err := os.Stat(s.config.Path)
 	if err != nil {
 		if !s.started {
@@ -157,16 +205,30 @@ func (s *source) step() {
 		// so writes racing with logrotate can still be observed.
 		startAtEnd := !s.started && !s.initialMissing
 		resumeAt := int64(-1)
+		priorOffset := int64(-1)
 		if !s.started && s.checkpoints != nil {
 			checkpoint, found, loadErr := s.checkpoints.LoadOffset(context.Background(), s.config.Path)
 			if loadErr != nil {
 				s.logger.Printf("access log checkpoint unavailable path=%s: %v", s.config.Path, loadErr)
 			} else if found {
+				if at, err := s.checkpoints.OffsetUpdatedAt(context.Background(), s.config.Path); err == nil {
+					s.mu.Lock()
+					s.status.LastCheckpointAt = &at
+					s.mu.Unlock()
+				}
 				device, inode, ok := fileIdentity(info)
 				if ok && checkpoint.Device == device && checkpoint.Inode == inode && checkpoint.Bytes >= 0 && checkpoint.Bytes <= info.Size() {
 					resumeAt = checkpoint.Bytes
+					priorOffset = checkpoint.Bytes
 					startAtEnd = false
 				}
+			}
+		}
+		if !s.started && s.resume != nil {
+			dev, inode, ok := fileIdentity(info)
+			if ok && dev == s.resume.Device && inode == s.resume.Inode && s.resume.Bytes <= info.Size() {
+				resumeAt = s.resume.Bytes
+				startAtEnd = false
 			}
 		}
 		replacement, err := openFile(s.config.Path, info, startAtEnd, resumeAt)
@@ -178,11 +240,14 @@ func (s *source) step() {
 				s.retiring = append(s.retiring, s.active)
 				s.logger.Printf("access log rotated path=%s site=%s", s.config.Path, s.config.Site)
 			}
+			if s.resume != nil && priorOffset >= 0 && priorOffset < replacement.committedOffset {
+				replacement.boundaries = append(replacement.boundaries, boundary{at: time.Now().Truncate(time.Second), offset: priorOffset})
+			}
 			s.active = replacement
 			s.started = true
 			s.setOpen(true)
 			s.clearError()
-			s.logger.Printf("watching access log path=%s site=%s", s.config.Path, s.config.Site)
+			s.logger.Printf("watching log source path=%s site=%s kind=%s format=%s", s.config.Path, s.config.Site, s.config.Kind, s.config.Format)
 			if resumeAt < 0 {
 				s.saveCheckpoint(replacement, replacement.offset)
 			}
@@ -249,11 +314,17 @@ func (s *source) drain(file *openLog) {
 		file.offset = 0
 		file.committedOffset = 0
 		file.pending = nil
+		file.boundaries = nil
 		file.discard = false
 		s.logger.Printf("access log truncated path=%s site=%s", s.config.Path, s.config.Site)
 	}
 	readAny := false
+	startOffset := file.offset
+	completeLines := 0
 	for {
+		if file.offset-startOffset >= 8<<20 || completeLines >= 16384 {
+			break
+		}
 		fragment, err := file.reader.ReadSlice('\n')
 		if len(fragment) > 0 {
 			readAny = true
@@ -268,6 +339,7 @@ func (s *source) drain(file *openLog) {
 			}
 		}
 		if err == nil {
+			s.trackBoundary(file, file.committedOffset)
 			if file.discard {
 				s.recordBad(errors.New("access-log line exceeds 1 MiB"))
 			} else {
@@ -278,6 +350,7 @@ func (s *source) drain(file *openLog) {
 			file.pending = nil
 			file.discard = false
 			file.committedOffset = file.offset
+			completeLines++
 			continue
 		}
 		if errors.Is(err, bufio.ErrBufferFull) {
@@ -288,19 +361,65 @@ func (s *source) drain(file *openLog) {
 		}
 		break
 	}
+	s.mu.Lock()
+	s.status.LagBytes = max(int64(0), info.Size()-file.committedOffset)
+	s.mu.Unlock()
 	if readAny && !file.retireAfter.IsZero() {
 		file.retireAfter = time.Now().Add(rotationGrace)
 	}
 }
 
 func (s *source) handleLine(line string) {
-	event, err := parser.Parse(line, s.config.Site)
+	if s.config.Kind == "error" {
+		if s.parser == nil {
+			s.recordBad(errors.New("error parser unavailable"))
+			return
+		}
+		event, err := s.parser.ParseError(line)
+		if err != nil {
+			s.recordBad(err)
+			return
+		}
+		if s.config.MinimumSeverity != "" && parser.SeverityRank(event.Severity) < parser.SeverityRank(s.config.MinimumSeverity) {
+			s.mu.Lock()
+			s.status.Filtered++
+			s.mu.Unlock()
+			return
+		}
+		s.mu.Lock()
+		s.status.Parsed++
+		now := time.Now().UTC()
+		s.status.LastRecordAt = &now
+		s.mu.Unlock()
+		if s.onError != nil {
+			s.onError(event)
+		}
+		return
+	}
+
+	var event model.RequestEvent
+	var err error
+	if s.parser == nil {
+		err = errors.New("source parser unavailable")
+	} else {
+		event, err = s.parser.Parse(line)
+	}
 	if err != nil {
 		s.recordBad(err)
 		return
 	}
 	s.mu.Lock()
 	s.status.Parsed++
+	now := time.Now().UTC()
+	s.status.LastRecordAt = &now
+	for _, item := range []struct {
+		name    string
+		missing bool
+	}{{"request_time", event.RequestTime == nil}, {"upstream_time", event.UpstreamTime == nil}, {"bytes", event.Bytes == nil}, {"request_id", event.RequestID == ""}} {
+		if item.missing {
+			s.status.MissingFields[item.name]++
+		}
+	}
 	s.mu.Unlock()
 	if s.onEvent != nil {
 		s.onEvent(event)
@@ -310,10 +429,12 @@ func (s *source) handleLine(line string) {
 func (s *source) recordBad(err error) {
 	s.mu.Lock()
 	s.status.BadLines++
+	category := parseCategory(err)
+	s.status.ParseErrors[category]++
 	count := s.status.BadLines
 	s.mu.Unlock()
 	if powerOfTwo(count) {
-		s.logger.Printf("skipped malformed access log path=%s site=%s count=%d: %v", s.config.Path, s.config.Site, count, err)
+		s.logger.Printf("skipped malformed access log path=%s site=%s count=%d: %v", s.config.Path, s.config.Site, count, parser.RedactMessage(err.Error()))
 	}
 }
 
@@ -324,7 +445,7 @@ func (s *source) recordIO(err error) {
 	s.status.LastError = err.Error()
 	s.mu.Unlock()
 	if powerOfTwo(count) {
-		s.logger.Printf("access log unavailable path=%s site=%s failures=%d: %v", s.config.Path, s.config.Site, count, err)
+		s.logger.Printf("access log unavailable path=%s site=%s failures=%d: %v", s.config.Path, s.config.Site, count, parser.RedactMessage(err.Error()))
 	}
 }
 
@@ -389,4 +510,30 @@ func fileIdentity(info os.FileInfo) (uint64, uint64, bool) {
 
 func powerOfTwo(value uint64) bool {
 	return value != 0 && value&(value-1) == 0
+}
+
+func sourceParser(file config.AccessFile, profiles map[string]config.LogProfile) *parser.Source {
+	p, _ := parser.NewSource(file, profiles)
+	return p
+}
+func (m *Manager) SetProfiles(profiles map[string]config.LogProfile) {
+	for _, s := range m.sources {
+		s.parser = sourceParser(s.config, profiles)
+	}
+}
+
+func (m *Manager) SetErrorSink(sink func(model.ErrorEvent)) {
+	for _, s := range m.sources {
+		s.onError = sink
+	}
+}
+
+func parseCategory(err error) string {
+	v := err.Error()
+	for _, kind := range []string{"timestamp", "client IP", "peer IP", "HTTP status", "duration", "duplicate", "line exceeds", "JSON", "logfmt"} {
+		if strings.Contains(v, kind) {
+			return kind
+		}
+	}
+	return "invalid_record"
 }

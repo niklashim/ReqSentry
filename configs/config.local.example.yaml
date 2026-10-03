@@ -5,16 +5,30 @@ mode: monitor
 
 access_files:
   - path: /var/log/nginx/site1.access.log
-    site: him.com
+    site: shop.example
     type: nginx
   - path: /var/log/nginx/site2.access.log
-    site: mycoolshop.se
+    site: api.example
     type: nginx
   - path: /var/log/nginx/site3.access.log
-    site: ekstrom.nu
+    site: docs.example
     type: nginx
   - path: /var/log/nginx/site4.access.log
-    site: wordpress-site.com
+    site: blog.example
+    type: nginx
+
+error_files:
+  - path: /var/log/nginx/site1.error.log
+    site: shop.example
+    type: nginx
+  - path: /var/log/nginx/site2.error.log
+    site: api.example
+    type: nginx
+  - path: /var/log/nginx/site3.error.log
+    site: docs.example
+    type: nginx
+  - path: /var/log/nginx/site4.error.log
+    site: blog.example
     type: nginx
 
 client_ip:
@@ -28,6 +42,8 @@ analysis:
   window: 30s
 
 database:
+  retention:
+    max_age: 96h # Four days; increase or decrease for all saved investigation history.
   path: /var/lib/reqsentry/reqsentry.db
 
 maxmind:

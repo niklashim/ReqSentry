@@ -1,6 +1,6 @@
 # Access-log formats
 
-ReqSentry currently accepts the standard Nginx and Apache combined formats and Apache's common format. The fields are client IP, ident/user placeholders, bracketed local timestamp, quoted request, final status, response bytes, and (for combined) quoted referrer and User-Agent. Apache virtual-host common lines may prefix the client IP with a host name. Set a stable `site` for each configured file; the logged host is extra context and does not override that site.
+ReqSentry accepts the standard Nginx and Apache combined formats and Apache's common format, plus explicitly configured [JSON and logfmt sources](structured-logs.md). The fields are client IP, ident/user placeholders, bracketed local timestamp, quoted request, final status, response bytes, and (for combined) quoted referrer and User-Agent. Apache virtual-host common lines may prefix the client IP with a host name. Set a stable `site` for each configured file; the logged host is extra context and does not override that site.
 
 For richer timing evidence, append ReqSentry's named fields to combined logs. The parser treats `-` and missing fields as unavailable. Request and upstream timing signals must not run when their fields are unavailable.
 
@@ -44,3 +44,5 @@ CustomLog /var/log/apache/site2.access.log reqsentry
 - Standard combined logs have no `rt`, `rt_us`, or `urt`, so timing-based detection has no evidence from them.
 - `client_ip.trusted_proxies` accepts explicit IPs/CIDRs. ReqSentry trusts `xff` only when the immediate peer matches one of them, then walks the chain from right to left until it finds the first untrusted hop. Alternatively, configure `client_ip.header` as `cf-connecting-ip` or `x-real-ip` and log that header as `cfip="..."` or `xrealip="..."`. With no trusted proxies, forwarding headers are ignored.
 - If a web-server module has already rewritten its first IP field but removed the forwarded header, ReqSentry conservatively uses the peer address. Keep the raw peer and chosen header available in the log format to resolve the true client independently.
+
+Optional `rid="..."` and `trace="..."` extensions retain bounded request/trace IDs for [error correlation](error-correlation.md). They are log claims, not client identity. Error files are separate optional inputs; they do not add access-request counts.

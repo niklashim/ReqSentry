@@ -41,8 +41,10 @@ func run(args []string, stdout, stderr io.Writer) int {
 	}
 	command := strings.Join(flags.Args(), " ")
 	isReplay := flags.NArg() > 0 && flags.Arg(0) == "replay"
-	if !isReplay && command != "" && command != "config test" && command != "status" && command != "report" && command != "maxmind status" && command != "maxmind update" {
-		fmt.Fprintln(stderr, "usage: reqsentry [-config PATH] [-check] [config test|status|report|maxmind status|maxmind update|replay LOG...]")
+	preview := flags.NArg() == 2 && flags.Arg(0) == "preview"
+	testNotification := flags.NArg() == 3 && flags.Arg(0) == "notifications" && flags.Arg(1) == "test"
+	if !isReplay && !preview && !testNotification && command != "prune preview" && command != "" && command != "config test" && command != "status" && command != "report" && command != "maxmind status" && command != "maxmind update" {
+		fmt.Fprintln(stderr, "usage: reqsentry [-config PATH] [-check] [-limit N] [config test|status|report|maxmind status|maxmind update|preview LOG|replay LOG...|notifications test NAME|prune preview]")
 		return 2
 	}
 	cfg, err := config.Load(*path)
@@ -68,6 +70,49 @@ func run(args []string, stdout, stderr io.Writer) int {
 	}
 	if *check || command == "config test" {
 		fmt.Fprintln(stdout, "configuration valid (monitor mode)")
+		return 0
+	}
+	if preview {
+		path, err := filepath.Abs(flags.Arg(1))
+		if err != nil {
+			fmt.Fprintln(stderr, err)
+			return 1
+		}
+		result, err := replay.PreviewSource(context.Background(), path, cfg, *limit)
+		if err != nil {
+			fmt.Fprintln(stderr, err)
+			return 1
+		}
+		if err := json.NewEncoder(stdout).Encode(result); err != nil {
+			fmt.Fprintln(stderr, err)
+			return 1
+		}
+		return 0
+	}
+	if testNotification {
+		n := output.NewNotifications(cfg.Output.Destinations, log.New(stderr, "", 0), cfg.Server.Name)
+		defer n.Close()
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+		if err := n.Test(ctx, flags.Arg(2)); err != nil {
+			fmt.Fprintln(stderr, err)
+			return 1
+		}
+		fmt.Fprintln(stdout, "synthetic notification accepted; verify receipt at the destination")
+		return 0
+	}
+	if command == "prune preview" {
+		ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+		defer cancel()
+		p, err := storage.PreviewPruneFile(ctx, cfg.Database.Path, cfg.Database.Retention, time.Now())
+		if err != nil {
+			fmt.Fprintln(stderr, err)
+			return 1
+		}
+		if err := json.NewEncoder(stdout).Encode(p); err != nil {
+			fmt.Fprintln(stderr, err)
+			return 1
+		}
 		return 0
 	}
 	if isReplay {
@@ -105,7 +150,7 @@ func run(args []string, stdout, stderr io.Writer) int {
 	defer stop()
 	var logWriter io.Writer = stderr
 	if cfg.Output.Log.Enabled {
-		file := output.NewFile(cfg.Output.Log.Path, stderr)
+		file := output.NewRetainedFile(cfg.Output.Log.Path, stderr, cfg.Database.Retention.MaxAge.Duration, "operational")
 		defer file.Close()
 		logWriter = io.MultiWriter(stderr, file)
 	}
@@ -130,30 +175,33 @@ func run(args []string, stdout, stderr io.Writer) int {
 		logger.Printf("SQLite unavailable; monitoring continues without persistent history or restart offsets: %v", err)
 	} else {
 		defer store.Close()
+		store.SetRetention(cfg.Database.Retention)
+		maintenanceCtx, maintenanceCancel := context.WithCancel(ctx)
+		maintenanceDone := make(chan struct{})
+		go func() { defer close(maintenanceDone); store.Maintain(maintenanceCtx, cfg.Database.Retention) }()
+		defer func() { maintenanceCancel(); <-maintenanceDone }()
 		service.SetCheckpointStore(store)
 		sinks = append(sinks, store)
 	}
 	if cfg.Output.Incidents.Enabled {
-		file := output.NewFile(cfg.Output.Incidents.Path, stderr)
+		file := output.NewRetainedFile(cfg.Output.Incidents.Path, stderr, cfg.Database.Retention.MaxAge.Duration, "incidents")
 		defer file.Close()
 		sinks = append(sinks, output.IncidentFile{File: file})
 	}
-	var slack *output.Slack
+	destinations := append([]config.DestinationConfig(nil), cfg.Output.Destinations...)
 	slackStatus := "disabled"
 	if cfg.Output.Slack.Enabled {
-		slackStatus = "unavailable"
-		slack, err = output.NewSlack(cfg.Output.Slack, logger)
-		if err != nil {
-			logger.Printf("Slack unavailable; local monitoring continues: %v", err)
-		} else {
-			slackStatus = "configured"
-			defer slack.Close()
-			sinks = append(sinks, slack)
-			service.SetOperationalSink(slack)
-			if store != nil {
-				store.SetOperationalSink(slack)
-			}
-		}
+		legacy := cfg.Output.Slack
+		destinations = append(destinations, config.DestinationConfig{Name: "legacy-slack", Type: "slack", Enabled: true, WebhookEnv: legacy.WebhookEnv, WebhookCredential: legacy.WebhookCredential, MinimumScore: legacy.MinimumScore, Cooldown: legacy.Cooldown, Operational: true, QueueSize: 128, MaxAttempts: 3, MaxAge: config.Duration{Duration: time.Minute}})
+		slackStatus = "configured"
+	}
+	notifications := output.NewNotifications(destinations, logger, cfg.Server.Name)
+	defer notifications.Close()
+	sinks = append(sinks, notifications)
+	service.SetOperationalSink(notifications)
+	service.SetNotificationStatus(notifications.Status)
+	if store != nil {
+		store.SetOperationalSink(notifications)
 	}
 	service.SetIntegrationStatus(maxMindStatus, slackStatus)
 	if len(sinks) > 0 {
@@ -182,9 +230,7 @@ func run(args []string, stdout, stderr io.Writer) int {
 	if cfg.MaxMind.Enabled && cfg.MaxMind.Update.Enabled && store != nil && manager != nil {
 		updateDone = make(chan struct{})
 		updater := maxmindupdate.New(cfg.MaxMind, store, manager, logger)
-		if slack != nil {
-			updater.SetOperationalSink(slack)
-		}
+		updater.SetOperationalSink(notifications)
 		go func() {
 			defer close(updateDone)
 			updater.Run(ctx)
@@ -251,6 +297,7 @@ func runOperator(command string, limit int, cfg config.Config, stdout, stderr io
 			return 1
 		}
 	case "report":
+		store.SetRetention(cfg.Database.Retention)
 		incidents, err := store.RecentIncidents(ctx, limit)
 		if err != nil {
 			fmt.Fprintln(stderr, err)

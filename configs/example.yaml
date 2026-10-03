@@ -1,111 +1,415 @@
-# Configuration example for the monitor-only daemon.
-# Paths and thresholds are examples; adjust them for the target Linux server.
+# ReqSentry configuration reference and minimal starter.
+# Like a PHP configuration reference, optional settings are commented out so
+# you can see every supported setting and enable only what you need.
+# This file remains YAML; copy it to /etc/reqsentry/config.yaml and edit it.
+#
+# Only server.name, at least one access_files path, and database.path are active.
+# Uncomment a setting AND its parent block, preserving the shown indentation.
+# Nested comments stay optional when you uncomment their enclosing block.
+# Do not enable both alternatives where a comment says to choose one.
+# Values shown are defaults unless labeled as examples or opt-in features.
+# Durations use s, m, or h (96h = four days); the unit d is not supported.
+# Paths must be clean absolute paths. Adjust names and paths for your server.
+# Secrets below are environment VARIABLE NAMES or systemd CREDENTIAL NAMES,
+# never passwords, license keys, or webhook URLs themselves.
+# Validate edits without sending messages or starting monitoring:
+#   reqsentry -config /etc/reqsentry/config.yaml config test
+
+# --- Server identity and monitoring mode ---
 server:
-  name: web-prod-03
+  name: web-prod-03 # Example: identify this server in incidents and alerts.
 
-mode: monitor
+# Only monitor mode is supported; WOULD_BLOCK decisions take no action.
+# mode: monitor
 
+# --- Access logs ---
+# At least one path is required. Repeat entries for additional sites.
+# The configured site is authoritative; a logged Host cannot change it.
+# If site is omitted, it is derived from the filename (here: site1).
+# type is optional metadata: nginx or apache. Format defaults to combined.
 access_files:
   - path: /var/log/nginx/site1.access.log
-    site: site1
-    type: nginx
-  - path: /var/log/apache/site2.access.log
-    site: site2
-    type: apache
+    # site: site1
+    # type: nginx
+    # format: combined
+    # timezone: UTC # IANA zone; used for timestamps without an offset.
 
-# Forwarded headers are ignored until the immediate peer matches a trusted CIDR.
-client_ip:
-  header: x-forwarded-for
-  trusted_proxies: []
+  # Another combined source (example):
+  # - path: /var/log/apache2/site2.access.log
+  #   site: site2
+  #   type: apache
+  #   format: combined
+  #   timezone: UTC
 
-allowlist: []
+  # Structured source (example): choose json or logfmt to match the producer.
+  # One complete record per line; see docs/structured-logs.md.
+  # - path: /var/log/app/access.jsonl
+  #   site: app
+  #   format: json
+  #   timezone: UTC
+  #   # Optional: also uncomment the matching log_profiles block below.
+  #   # profile: custom
 
-trigger:
-  mode: cpu
-  cpu_start: 80
-  cpu_stop: 60
-  start_duration: 10s
-  stop_duration: 60s
+# --- Error logs and incident correlation (optional) ---
+# Errors provide context; they do not add requests or change detection scores.
+# Formats: nginx-error, apache-error, json, logfmt. If omitted, type selects
+# nginx-error or apache-error. Leave site empty for shared server context.
+# minimum_severity: debug, info, notice, warning, error, critical, alert,
+# emergency (default warning). Stack traces are off by default and local only.
+# See docs/error-correlation.md.
+# error_files:
+#   - path: /var/log/nginx/site1.error.log
+#     site: site1
+#     type: nginx
+#     format: nginx-error
+#     timezone: UTC
+#     minimum_severity: warning
+#     retain_stack_trace: false
+#   - path: /var/log/app/errors.jsonl
+#     site: app
+#     format: json
+#     timezone: UTC
+#     minimum_severity: warning
+#     retain_stack_trace: false
+#     # Optional mapping; declare the matching profile below.
+#     # profile: custom
 
-analysis:
-  window: 30s
+# Association window before an incident's start: 1s to 5m.
+# max_events: 32 to 16384 records in EACH access/error context ring.
+# correlation:
+#   window: 60s
+#   max_events: 4096
 
-# Rolling counters are held in memory and bounded per active site/IP record.
-aggregation:
-  max_active_records: 2048
-  max_paths_per_ip: 64
-  max_404_paths_per_ip: 64
-  max_user_agents_per_ip: 8
-  max_query_patterns_per_ip: 16
-  max_value_bytes: 256
-  degrade_at_bytes: 268435456
-  recover_below_bytes: 201326592
+# --- Structured log mapping profiles (optional) ---
+# Profiles work only with json/logfmt sources. Reference their name using
+# that source's profile setting. Canonical fields work without a profile.
+# preset: canonical (default), ecs-v1, or its alias ecs.
+# timestamp: rfc3339 (default), unix_s, unix_ms, unix_ns; no unit guessing.
+# duration_unit: s (canonical default), ms, us, ns (ECS default).
+# fields maps normalized names to producer keys. The complete supported set
+# is below, with canonical selectors. Change only mappings your producer needs.
+# Literal dotted keys work; /http/status selects a nested JSON object field.
+# No arrays, wildcard selectors, or arbitrary JSONPath. See docs/structured-logs.md.
+# log_profiles:
+#   custom:
+#     preset: canonical
+#     timestamp: rfc3339
+#     duration_unit: s
+#     fields:
+#       timestamp: timestamp
+#       client_ip: client_ip
+#       peer: peer_ip
+#       xff: forwarded_for
+#       cfip: cf_connecting_ip
+#       xrealip: x_real_ip
+#       method: method
+#       target: target # Full request target, or supply path and query separately.
+#       path: path
+#       query: query
+#       status: status
+#       bytes: bytes
+#       host: host
+#       user_agent: user_agent
+#       referrer: referrer
+#       request_time: request_time
+#       upstream_time: upstream_time
+#       location: location
+#       request_id: request_id
+#       trace_id: trace_id
+#       severity: severity # Error sources.
+#       message: message # Error sources.
+#       error_type: error_type
+#       error_code: error_code
+#       stack_trace: stack_trace
+#   ecs:
+#     preset: ecs-v1
+#     timestamp: rfc3339
+#     duration_unit: ns
 
-health:
-  interval: 1s
+# --- Client identity and exclusions ---
+# Forwarded headers are ignored unless the immediate peer is trusted.
+# header: x-forwarded-for (default), cf-connecting-ip, x-real-ip.
+# Replace [] only with your actual trusted proxy IPs/CIDRs, e.g. [192.0.2.10].
+# Trust-all CIDRs (/0) are rejected. This is separate from dashboard proxies.
+# client_ip:
+#   header: x-forwarded-for
+#   trusted_proxies: []
 
-# Expose the PHP-FPM status page only on loopback; see docs/php-fpm.md.
-php_fpm:
-  enabled: false
-  interval: 5s
-  pools: []
+# Exempt IPs/CIDRs from client scoring; their requests still count in totals.
+# Example: [192.0.2.20, 2001:db8:1234::/48]. Default: no exemptions.
+# allowlist: []
 
-detection:
-  ruleset_version: 1
-  watch_score: 30
-  suspicious_score: 60
-  would_block_score: 80
-  # Optional per-signal weights and named thresholds override code defaults.
-  # Tune only after reviewing monitor-mode incidents and replay results.
+# --- Analysis trigger and resource bounds ---
+# always analyzes continuously (default). For cpu mode, change mode to cpu
+# and uncomment ALL four CPU settings; their values below are examples.
+# CPU mode requires 0 <= cpu_stop < cpu_start <= 100 and positive durations.
+# Bounded recovery below requires always mode.
+# trigger:
+#   mode: always
+#   # cpu_start: 80
+#   # cpu_stop: 60
+#   # start_duration: 10s
+#   # stop_duration: 60s
 
+# Rolling analysis window: whole seconds from 1s to 60s.
+# analysis:
+#   window: 30s
+
+# Memory is bounded per active site/IP plus server-wide IP record.
+# Counts/bytes must be positive; omitted or zero values use defaults.
+# At degrade_at_bytes, optional evidence is shed; recover below the lower limit.
+# Memory thresholds must satisfy 1 MiB <= recover_below_bytes < degrade_at_bytes.
+# aggregation:
+#   max_active_records: 2048
+#   max_paths_per_ip: 64
+#   max_404_paths_per_ip: 64
+#   max_user_agents_per_ip: 8
+#   max_query_patterns_per_ip: 16
+#   max_value_bytes: 256
+#   degrade_at_bytes: 268435456 # 256 MiB.
+#   recover_below_bytes: 201326592 # 192 MiB.
+
+# Host health sampling interval: 1s to 1m.
+# health:
+#   interval: 1s
+
+# --- PHP-FPM health (opt-in; disabled by default) ---
+# Poll 1 to 16 uniquely named pools; interval: 1s to 1m.
+# Status URLs must use HTTP(S) on localhost or a loopback IP.
+# Example pool: configure its status page first; see docs/php-fpm.md.
+# php_fpm:
+#   enabled: true
+#   interval: 5s
+#   pools:
+#     - name: www
+#       status_url: http://127.0.0.1/fpm-status?json
+
+# --- Detection and scoring overrides ---
+# Defaults are listed in full. Uncomment only the overrides you need and
+# their parent blocks. Review incidents/replay before tuning.
+# Scores must satisfy 1 <= watch_score < suspicious_score < would_block_score <= 100.
+# Weights range from 0 to 100; zero disables that signal's score contribution.
+# Thresholds must be positive; ratios are fractions from 0 to 1.
+# detection:
+#   ruleset_version: 1
+#   watch_score: 30
+#   suspicious_score: 60
+#   would_block_score: 80
+#   weights:
+#     HIGH_404_RATE: 20
+#     HIGH_404_DIVERSITY: 25
+#     PATH_ENUMERATION: 25
+#     QUERY_ENUMERATION: 25
+#     HIGH_REQUEST_RATE: 10
+#     HIGH_BURST_RATE: 10
+#     SUSTAINED_HIGH_RATE: 10
+#     HIGH_5XX_CONTRIBUTION: 10
+#     HIGH_REDIRECT_RATIO: 5
+#     METHOD_404_SCAN: 15
+#     MISSING_USER_AGENT: 3
+#     USER_AGENT_ROTATION: 5
+#     AUTOMATED_USER_AGENT: 3
+#     HOSTING_NETWORK: 3
+#     CROSS_SITE_SCAN: 15
+#     HIGH_TRAFFIC_SHARE: 10
+#     CPU_SPIKE_CONTRIBUTOR: 15
+#     PHP_FPM_SATURATION_CONTRIBUTOR: 15
+#     HIGH_REQUEST_COST: 15
+#   thresholds:
+#     high_404_min_requests: 30
+#     high_404_min_count: 20
+#     high_404_ratio: 0.70
+#     unique_404_min: 20
+#     unique_404_ratio: 0.60
+#     path_enumeration_min: 10
+#     query_enumeration_min: 10
+#     high_rate_min_requests: 100
+#     high_rate_rps: 10 # Requests per second.
+#     burst_rps: 50
+#     sustained_rps: 10
+#     sustained_active_ratio: 0.80
+#     high_5xx_min_requests: 30
+#     high_5xx_min_count: 10
+#     high_5xx_ratio: 0.20
+#     redirect_min_requests: 30
+#     redirect_min_count: 20
+#     redirect_ratio: 0.70
+#     method_404_min_count: 10
+#     method_404_min_unique: 10
+#     missing_ua_min_requests: 20
+#     missing_ua_min_count: 15
+#     missing_ua_ratio: 0.70
+#     ua_rotation_min_requests: 20
+#     ua_rotation_min_distinct: 4
+#     ua_rotation_min_switches: 6
+#     cross_site_min_sites: 3
+#     cross_site_min_requests: 50
+#     cross_site_min_404_count: 30
+#     cross_site_404_ratio: 0.60
+#     cross_site_min_unique404: 20
+#     high_share_min_requests: 100
+#     high_share_ratio: 0.30
+#     cpu_pressure_percent: 80 # Percent, maximum 100.
+#     high_cost_min_samples: 10
+#     high_cost_ms: 500 # Milliseconds.
+
+# --- Local database and shared retention ---
 database:
   path: /var/lib/reqsentry/reqsentry.db
+  # All saved investigation history AND ReqSentry's own configured output
+  # files default to at most four days. Change max_age to increase/decrease
+  # that ceiling: e.g. 48h (two days) or 240h (ten days), minimum 1h.
+  # Shorter per-table ages are optional; omitted/0 inherits max_age and
+  # longer values are capped. No unlimited retention. Physical cleanup is
+  # periodic; reads immediately hide expired history. Essential checkpoints
+  # remain. Input logs, external backups, journald and delivered messages
+  # have their own retention. See docs/storage-output.md.
+  # retention:
+  #   max_age: 96h
+  #   incidents: 0s # Inherit max_age; e.g. 48h for shorter incident/request history.
+  #   errors: 0s # Inherit max_age; an explicit shorter age must be at least 1h.
+  #   minutes: 0s # Inherit max_age; an explicit shorter age must be at least 1h.
+  #   interval: 1m # Database cleanup frequency; minimum 1s.
+  #   error_samples_per_second: 20 # Across all sources; 1 to 1000.
+  #   batch_size: 500 # Rows per cleanup batch; 1 to 2000.
+  #   minimum_free_bytes: 0 # Disable low-disk warnings; e.g. 1073741824 = 1 GiB.
 
-maxmind:
-  enabled: false
-  edition: GeoIP2-Enterprise
-  database_dir: /var/lib/reqsentry/maxmind
-  update:
-    enabled: false
-    interval: 24h
-  # To enable updates, set enabled above, account_id, and exactly one of:
-  # license_key_env: REQSENTRY_MAXMIND_LICENSE_KEY
-  # license_key_credential: maxmind-license-key
+# --- Bounded crash recovery (opt-in; disabled by default) ---
+# Requires trigger.mode: always. Interval minimum 1s; max_bytes: 1 to 128 MiB.
+# Adds periodic safe checkpoints with a bounded overlap/recovery budget.
+# Remote/JSONL delivery may repeat stable event IDs; see docs/storage-output.md.
+# recovery:
+#   enabled: true
+#   interval: 1m
+#   max_bytes: 16777216 # 16 MiB.
 
-output:
-  # Create /var/log/reqsentry and grant the service account write access.
-  # New files use mode 0600; see docs/storage-output.md.
-  log:
-    enabled: true
-    path: /var/log/reqsentry/reqsentry.log
-  incidents:
-    enabled: true
-    path: /var/log/reqsentry/incidents.jsonl
-  slack:
-    enabled: false
-    minimum_score: 80
-    cooldown: 10m
-    # To enable Slack, use exactly one of:
-    # webhook_env: REQSENTRY_SLACK_WEBHOOK
-    # webhook_credential: slack-webhook
+# --- MaxMind enrichment (opt-in; disabled by default) ---
+# Reads local MMDB files; provide licensed files in database_dir.
+# To also download updates, uncomment the nested downloader settings.
+# Supported editions: GeoIP2-Enterprise, GeoIP2-ISP, GeoLite2-ASN,
+# GeoIP2-City, GeoLite2-City, GeoIP2-Country, GeoLite2-Country.
+# The downloader defaults to GeoIP2-Enterprise and interval 24h (minimum 1h).
+# See docs/maxmind.md and docs/install.md for credentials.
+# maxmind:
+#   enabled: true
+#   database_dir: /var/lib/reqsentry/maxmind
+#   # edition: GeoIP2-Enterprise
+#   # account_id: "123456" # Example: replace with your MaxMind account ID.
+#   # license_key_env: REQSENTRY_MAXMIND_LICENSE_KEY
+#   # Alternative to license_key_env; choose exactly one:
+#   # license_key_credential: maxmind-license-key
+#   # update:
+#   #   enabled: true
+#   #   interval: 24h
 
-# Optional read-only dashboard. Disabled until explicitly enabled.
-# For SSH tunneling, keep loopback listen and allowlist; do not add loopback to
-# trusted_proxies unless a local reverse proxy always supplies X-Forwarded-For.
-web:
-  enabled: false
-  listen: 127.0.0.1
-  port: 8090
-  allowed_ips:
-    - 127.0.0.1
-    - ::1
-  trusted_proxies: []
-  auth:
-    enabled: false
-    # username: admin
-    # password_env: REQSENTRY_WEB_PASSWORD
-    # Or password_credential: dashboard-password
-  realtime:
-    enabled: true
-    interval: 2s
-    max_clients: 32
+# --- Local output and remote notifications (all opt-in) ---
+# Uncomment output plus ONLY the children/destinations you need.
+# Local file parents must exist and be writable. New files use mode 0600.
+# Files rotate hourly and expire under database.retention.max_age.
+# Remote queues never block access-log ingestion; see docs/notifications.md.
+# output:
+#   log:
+#     enabled: true
+#     path: /var/log/reqsentry/reqsentry.log
+#   incidents:
+#     enabled: true
+#     path: /var/log/reqsentry/incidents.jsonl
+#
+#   # Existing shorthand Slack integration (alternative to named Slack).
+#   # Choose output.slack OR named Slack destinations, never both enabled.
+#   # Its minimum_score defaults to 80 and cooldown to 10m.
+#   # slack:
+#   #   enabled: true
+#   #   webhook_env: REQSENTRY_SLACK_WEBHOOK
+#   #   # Alternative to webhook_env; choose exactly one:
+#   #   # webhook_credential: slack-webhook
+#   #   minimum_score: 80
+#   #   cooldown: 10m
+#
+#   # Up to 32 unique named destinations. Repeated common settings below
+#   # apply to ALL three providers; shown values are defaults except
+#   # minimum_score: 80 (example; named destinations default to 0).
+#   # sites: [] includes all; [site1, ""] includes site1 and server-wide alerts.
+#   # decisions: [] includes all; options: WATCH, SUSPICIOUS, WOULD_BLOCK.
+#   # operational opts into recurring operational alerts (default false);
+#   # incident site/score/decision filters do not restrict operational alerts.
+#   # queue_size: 1 to 1024; max_attempts: 1 to 8; max_age: 1s to 1h.
+#   # max_age here is the delivery queue age, separate from history retention.
+#   # dashboard_url is an optional public HTTPS base URL without query/fragment.
+#   destinations:
+#     - name: slack-security
+#       type: slack
+#       enabled: true
+#       webhook_env: REQSENTRY_SLACK_WEBHOOK
+#       # Alternative to webhook_env; choose exactly one:
+#       # webhook_credential: slack-webhook
+#       sites: []
+#       decisions: []
+#       minimum_score: 80
+#       operational: false
+#       cooldown: 10m
+#       queue_size: 128
+#       max_attempts: 3
+#       max_age: 1m
+#       # dashboard_url: https://reqsentry.example.com
+#     - name: teams-operations
+#       type: teams
+#       enabled: true
+#       # Teams Workflows URL in this variable; legacy connectors unsupported.
+#       webhook_env: REQSENTRY_TEAMS_WEBHOOK
+#       # Alternative to webhook_env; choose exactly one:
+#       # webhook_credential: teams-webhook
+#       sites: []
+#       decisions: []
+#       minimum_score: 80
+#       operational: false
+#       cooldown: 10m
+#       queue_size: 128
+#       max_attempts: 3
+#       max_age: 1m
+#       # dashboard_url: https://reqsentry.example.com
+#     - name: sns-security
+#       type: sns
+#       enabled: true
+#       # Example standard topic ARN; replace account/topic and match region.
+#       topic_arn: arn:aws:sns:eu-central-1:123456789012:reqsentry-incidents
+#       region: eu-central-1
+#       # Optional shared profile; otherwise use the AWS default credential
+#       # chain, including instance/task roles. Static keys do not belong here.
+#       # aws_profile: production
+#       sites: []
+#       decisions: []
+#       minimum_score: 80
+#       operational: false
+#       cooldown: 10m
+#       queue_size: 128
+#       max_attempts: 3
+#       max_age: 1m
+#       # dashboard_url: https://reqsentry.example.com
+
+# --- Read-only dashboard and searchable incident samples (opt-in) ---
+# Disabled by default. Shows up to five saved requests per incident; it does
+# not index every input log entry. See docs/dashboard.md and docs/incident-logs.md.
+# listen must be an IP literal; port: 1 to 65535. Example access policy below
+# allows only loopback (e.g. an SSH tunnel); allowed_ips defaults to [] (deny all).
+# trusted_proxies is separate from client_ip.trusted_proxies. Add only proxies
+# you control which always supply X-Forwarded-For; do not trust loopback merely
+# for SSH tunneling. Trust-all/allow-all CIDRs (/0) are rejected.
+# web:
+#   enabled: true
+#   listen: 127.0.0.1
+#   port: 8090
+#   allowed_ips: [127.0.0.1, "::1"]
+#   trusted_proxies: []
+#   # Optional HTTP Basic authentication (off by default).
+#   # Uncomment auth and one password reference; keep TLS at your proxy.
+#   # auth:
+#   #   enabled: true
+#   #   username: admin # Example username.
+#   #   password_env: REQSENTRY_WEB_PASSWORD
+#   #   # Alternative to password_env; choose exactly one:
+#   #   # password_credential: dashboard-password
+#   realtime:
+#     enabled: true # Default when the dashboard is enabled; false disables SSE.
+#     interval: 2s # 1s to 10s.
+#     max_clients: 32 # 1 to 256.

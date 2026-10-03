@@ -24,11 +24,12 @@ func TestReopenKeepsIncidentsStateAndOffsets(t *testing.T) {
 		t.Fatalf("SQLite file permissions: %v %v", info, err)
 	}
 	ctx := context.Background()
+	now := time.Now().UTC()
 	for _, address := range []string{"192.0.2.3", "2001:db8::7"} {
 		incident := model.Incident{
-			Timestamp: time.Unix(100, 0).UTC(), Server: "web", SiteID: "shop",
-			ClientIP: netip.MustParseAddr(address), WindowStart: time.Unix(70, 0).UTC(),
-			WindowEnd: time.Unix(100, 0).UTC(), Requests: 42, PeakRPS: 5,
+			Timestamp: now, Server: "web", SiteID: "shop",
+			ClientIP: netip.MustParseAddr(address), WindowStart: now.Add(-30 * time.Second),
+			WindowEnd: now, Requests: 42, PeakRPS: 5,
 			Score: 80, Decision: model.DecisionWouldBlock, RulesetVersion: 2, MonitorOnly: true,
 			Signals: []model.Signal{{Code: "HIGH_404_DIVERSITY", Weight: 25, Evidence: map[string]any{"paths": 40}}},
 		}

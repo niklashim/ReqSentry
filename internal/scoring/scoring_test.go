@@ -38,6 +38,26 @@ func TestSupportingSignalsCannotCreateWouldBlock(t *testing.T) {
 	}
 }
 
+func TestSamplesDoNotChangeDecisionOrIdentityAndRemainImmutable(t *testing.T) {
+	engine, err := New(config.DefaultDetectionConfig())
+	if err != nil {
+		t.Fatal(err)
+	}
+	input := testInput(model.Signal{Code: "PATH_ENUMERATION", Strength: model.SignalStrong})
+	before := engine.Evaluate(input)
+	bytes := int64(123)
+	input.Snapshot.RequestSamples = []model.RequestSample{{Timestamp: input.Snapshot.At, SiteID: "shop", ClientIP: input.Snapshot.ClientIP, Method: "GET", Path: "/missing", Status: 404, Bytes: &bytes}}
+	after := engine.Evaluate(input)
+	if before.Score != after.Score || before.Decision != after.Decision || before.EventID != after.EventID || before.RawScore != after.RawScore {
+		t.Fatal("request samples affected scoring")
+	}
+	bytes = 999
+	input.Snapshot.RequestSamples[0].Path = "changed"
+	if after.RequestSamples[0].Path != "/missing" || *after.RequestSamples[0].Bytes != 123 {
+		t.Fatal("caller mutated saved evidence")
+	}
+}
+
 func TestHostingMetadataCannotCreateWouldBlock(t *testing.T) {
 	rules := config.DefaultDetectionConfig()
 	rules.Weights["HOSTING_NETWORK"] = 100

@@ -13,6 +13,7 @@ import (
 	"github.com/niklashim/ReqSentry/internal/aggregator"
 	"github.com/niklashim/ReqSentry/internal/model"
 	"github.com/niklashim/ReqSentry/internal/storage"
+	"github.com/niklashim/ReqSentry/internal/watcher"
 )
 
 func (s *Server) api(w http.ResponseWriter, r *http.Request) {
@@ -49,8 +50,119 @@ func (s *Server) api(w http.ResponseWriter, r *http.Request) {
 		badQuery(w)
 		return
 	}
-	view := s.source.Dashboard(min(window, time.Minute), limit)
+	// Incident and health routes do not need a rolling IP scan. Build the
+	// bounded dashboard view only for routes that actually return it.
+	var view aggregator.DashboardView
+	viewReady := false
+	getView := func() aggregator.DashboardView {
+		if !viewReady {
+			view = s.source.Dashboard(min(window, time.Minute), limit)
+			viewReady = true
+		}
+		return view
+	}
 	switch parts[0] {
+	case "request-samples":
+		if len(parts) != 1 {
+			break
+		}
+		s.requestSampleAPI(w, r)
+		return
+	case "errors":
+		if len(parts) != 1 {
+			break
+		}
+		from, to := time.Now().Add(-window), time.Now()
+		if len(q.Get("site")) > 128 || len(q.Get("severity")) > 16 || len(q.Get("category")) > 128 {
+			badQuery(w)
+			return
+		}
+		events := []model.ErrorEvent{}
+		if s.store != nil {
+			var err error
+			events, err = s.store.RecentErrors(r.Context(), q.Get("site"), q.Get("severity"), q.Get("category"), from, to, limit)
+			if err != nil {
+				http.Error(w, "error history unavailable", http.StatusServiceUnavailable)
+				return
+			}
+		} else if src, ok := s.source.(interface {
+			RecentErrors(string, time.Time, time.Time, int) []model.ErrorEvent
+		}); ok {
+			events = src.RecentErrors(q.Get("site"), from, to, limit)
+			filtered := events[:0]
+			for _, e := range events {
+				if (q.Get("severity") == "" || e.Severity == q.Get("severity")) && (q.Get("category") == "" || e.Category == q.Get("category")) {
+					filtered = append(filtered, e)
+				}
+			}
+			events = filtered
+		}
+		sources := []watcher.Status{}
+		if src, ok := s.source.(interface{ ErrorSources() []watcher.Status }); ok {
+			sources = src.ErrorSources()
+		}
+		coverage := "bounded persisted samples; queued or dropped events may be absent"
+		if s.store == nil {
+			coverage = "bounded live samples; history unavailable"
+		}
+		if len(sources) == 0 {
+			coverage = "no error source configured"
+		}
+		association := q.Get("association")
+		related := []int64{}
+		if association != "" {
+			allowed := false
+			for _, v := range []string{"request_id", "trace_id", "logged_client_path_time", "site_time", "server_time"} {
+				if association == v {
+					allowed = true
+				}
+			}
+			if !allowed {
+				badQuery(w)
+				return
+			}
+			events = []model.ErrorEvent{}
+			coverage = "bounded saved incident correlation samples; association does not establish causation"
+			if s.store != nil {
+				items, _, err := s.store.SearchIncidents(r.Context(), storage.IncidentFilter{From: from, To: to, Site: q.Get("site"), MinScore: 0, MaxScore: 100, Limit: 50})
+				if err != nil {
+					http.Error(w, "correlation history unavailable", http.StatusServiceUnavailable)
+					return
+				}
+				// Fingerprints group failures; they are not event identities. Keep
+				// separate requests even when their timestamp and message match.
+				seen := map[model.ErrorEvent]bool{}
+				for _, item := range items {
+					if item.Incident.Errors == nil {
+						continue
+					}
+					matched := false
+					for _, sample := range item.Incident.Errors.Samples {
+						event := sample.Event
+						if event.Timestamp.Before(from) || event.Timestamp.After(to) || sample.Method != association || (q.Get("severity") != "" && event.Severity != q.Get("severity")) || (q.Get("category") != "" && event.Category != q.Get("category")) {
+							continue
+						}
+						matched = true
+						if !seen[event] && len(events) < limit {
+							events = append(events, event)
+							seen[event] = true
+						}
+					}
+					if matched {
+						related = append(related, item.ID)
+					}
+				}
+			}
+		}
+		step := max(int64(60), int64(window.Seconds())/120+1)
+		timeline := []storage.ErrorBucket{}
+		if s.store != nil && association == "" {
+			if buckets, err := s.store.ErrorHistory(r.Context(), q.Get("site"), from, to, step); err == nil {
+				timeline = buckets
+			}
+		}
+		jsonResponse(w, map[string]any{"errors": events, "timeline": timeline, "bucket_seconds": step, "sources": sources, "coverage": coverage, "range": label, "related_incidents": related})
+		return
 	case "server":
 		if len(parts) != 1 {
 			break
@@ -62,7 +174,7 @@ func (s *Server) api(w http.ResponseWriter, r *http.Request) {
 		if len(parts) != 1 {
 			break
 		}
-		data := map[string]any{"range": label, "live": view, "coverage": "server and site totals are exact within the in-memory window; IP, path, user-agent and ASN lists are bounded tracked samples"}
+		data := map[string]any{"range": label, "live": getView(), "coverage": "server and site totals are exact within the in-memory window; IP, path, user-agent and ASN lists are bounded tracked samples"}
 		if window > time.Minute {
 			if s.store == nil {
 				data["history_available"] = false
@@ -80,7 +192,8 @@ func (s *Server) api(w http.ResponseWriter, r *http.Request) {
 		return
 	case "sites":
 		if len(parts) == 1 {
-			jsonResponse(w, map[string]any{"at": view.At, "window_seconds": view.WindowSeconds, "sites": view.Sites})
+			current := getView()
+			jsonResponse(w, map[string]any{"at": current.At, "window_seconds": current.WindowSeconds, "sites": current.Sites})
 			return
 		}
 		site := parts[1]
@@ -88,9 +201,9 @@ func (s *Server) api(w http.ResponseWriter, r *http.Request) {
 			badQuery(w)
 			return
 		}
-		for _, item := range view.Sites {
+		for _, item := range getView().Sites {
 			if item.SiteID == site {
-				tracked := view.SiteIPs[site]
+				tracked := getView().SiteIPs[site]
 				data := map[string]any{"site": item, "top_ips": tracked, "top_networks": s.networksFor(tracked), "samples": summarizeSamples(tracked), "sample_coverage": "top tracked IPs only; path, query and user-agent counts are numbers of tracked IPs with the sample, not request totals"}
 				if s.store != nil && window > time.Minute {
 					history, err := s.history(r.Context(), site, window)
@@ -117,11 +230,11 @@ func (s *Server) api(w http.ResponseWriter, r *http.Request) {
 		return
 	case "ips":
 		if len(parts) == 1 {
-			items := view.TopIPs
+			items := getView().TopIPs
 			if site := q.Get("site"); site != "" {
-				items = view.SiteIPs[site]
+				items = getView().SiteIPs[site]
 			}
-			jsonResponse(w, map[string]any{"ips": items, "sample_coverage": "top tracked IPs only", "window_seconds": view.WindowSeconds})
+			jsonResponse(w, map[string]any{"ips": items, "sample_coverage": "top tracked IPs only", "window_seconds": getView().WindowSeconds})
 			return
 		}
 		ip, err := netip.ParseAddr(parts[1])
@@ -136,7 +249,7 @@ func (s *Server) api(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		enrich, enrichErr := s.source.Enrich(ip)
-		data := map[string]any{"snapshot": snapshot, "enrichment": enrich, "enrichment_available": enrichErr == nil && enrich.Available, "window_seconds": view.WindowSeconds}
+		data := map[string]any{"snapshot": snapshot, "enrichment": enrich, "enrichment_available": enrichErr == nil && enrich.Available, "window_seconds": int(min(window, time.Minute) / time.Second)}
 		if s.store != nil {
 			ctx, cancel := context.WithTimeout(r.Context(), 3*time.Second)
 			defer cancel()
@@ -152,7 +265,7 @@ func (s *Server) api(w http.ResponseWriter, r *http.Request) {
 		if len(parts) > 2 {
 			break
 		}
-		networks := s.networks(view)
+		networks := s.networks(getView())
 		if len(parts) == 1 {
 			jsonResponse(w, map[string]any{"networks": networks, "sample_coverage": "top tracked IPs with available local MaxMind enrichment"})
 			return
@@ -199,7 +312,7 @@ func (s *Server) api(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 		var missing uint64
-		for _, item := range view.TopIPs {
+		for _, item := range getView().TopIPs {
 			missing += item.MissingUserAgent
 			for agent, requests := range item.UserAgentRequests {
 				value := counts[agent]
@@ -390,7 +503,7 @@ func (s *Server) incidentAPI(w http.ResponseWriter, r *http.Request, parts []str
 			return
 		}
 	}
-	if to.Before(from) || to.Sub(from) > 7*24*time.Hour {
+	if to.Before(from) || to.Sub(from) > 366*24*time.Hour {
 		badQuery(w)
 		return
 	}
@@ -410,8 +523,8 @@ func (s *Server) incidentAPI(w http.ResponseWriter, r *http.Request, parts []str
 		}
 		ip = parsed.Unmap().String()
 	}
-	filter := storage.IncidentFilter{From: from, To: to, Site: q.Get("site"), IP: ip, Decision: decision, MinScore: minScore, MaxScore: maxScore, Signal: q.Get("signal"), Limit: limit, Offset: (page - 1) * limit}
-	if len(filter.Site) > 128 || len(filter.Signal) > 128 || filter.Offset > 10000 {
+	filter := storage.IncidentFilter{From: from, To: to, Site: q.Get("site"), IP: ip, Decision: decision, MinScore: minScore, MaxScore: maxScore, Signal: q.Get("signal"), Server: q.Get("server"), Query: q.Get("q"), Limit: limit, Offset: (page - 1) * limit}
+	if len(filter.Site) > 128 || len(filter.Signal) > 128 || len(filter.Server) > 128 || len(filter.Query) > 256 || filter.Offset > 10000 {
 		badQuery(w)
 		return
 	}

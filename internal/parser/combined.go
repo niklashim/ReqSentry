@@ -94,6 +94,10 @@ func Parse(line, site string) (model.RequestEvent, error) {
 		}
 		seen[key] = true
 		switch key {
+		case "rid":
+			event.RequestID = boundedID(value)
+		case "trace":
+			event.TraceID = boundedID(value)
 		case "host":
 			if value != "-" && value != "" {
 				event.Host = value
@@ -142,7 +146,7 @@ func Parse(line, site string) (model.RequestEvent, error) {
 }
 
 func isExtension(value string) bool {
-	for _, prefix := range []string{"host=", "rt=", "rt_us=", "urt=", "peer=", "xff=", "cfip=", "xrealip=", "loc="} {
+	for _, prefix := range []string{"rid=", "trace=", "host=", "rt=", "rt_us=", "urt=", "peer=", "xff=", "cfip=", "xrealip=", "loc="} {
 		if strings.HasPrefix(value, prefix) {
 			return true
 		}

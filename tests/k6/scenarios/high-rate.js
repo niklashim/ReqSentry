@@ -20,5 +20,5 @@ export const options = {
 };
 
 export default function () {
-  request('him.com', '/product?id=42', 'high-rate', 'rate_probe', { expected: [200] });
+  request('shop.example', '/product?id=42', 'high-rate', 'rate_probe', { expected: [200] });
 }

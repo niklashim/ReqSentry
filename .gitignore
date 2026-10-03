@@ -1,6 +1,35 @@
 .env
+.env.*
+!.env.example
 __pycache__/
 *.pyc
+.DS_Store
+
+# Local credentials, agent state, and private review material.
+/.aws/
+/.ssh/
+/.codex/
+/.agents/
+/secrets/
+/private-data/
+/artifacts/
+*.pem
+*.key
+*.p12
+*.pfx
+
+# Runtime databases, captured logs, and licensed geolocation downloads.
+*.db
+*.db-*
+*.sqlite
+*.sqlite-*
+*.sqlite3
+*.sqlite3-*
+*.log
+*.log.*
+*.mmdb
+# Public, MIT-licensed synthetic fixture needed by the enrichment tests.
+!/internal/enrichment/testdata/GeoIP2-Enterprise.mmdb
 
 # Runtime state from the local Docker environment. Keep directory placeholders.
 /dev-data/**
@@ -11,5 +40,10 @@ __pycache__/
 # Local configuration overrides and generated binaries.
 /configs/*.private.yaml
 /configs/*.override.yaml
+/configs/*.local.yaml
+/configs/*.secret.yaml
+/configs/config.yaml
+/configs/config.local.yaml
+/config.yaml
 /coverage.out
 /reqsentry

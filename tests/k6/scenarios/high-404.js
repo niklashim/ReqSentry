@@ -6,6 +6,6 @@ export default function () {
   for (let i = 0; i < 100; i++) {
     const missing = i < 90;
     const path = missing ? `/missing/high404-${String(i).padStart(3, '0')}` : '/about.html';
-    request('him.com', path, 'high-404', missing ? 'missing' : 'valid', { expected: [missing ? 404 : 200] });
+    request('shop.example', path, 'high-404', missing ? 'missing' : 'valid', { expected: [missing ? 404 : 200] });
   }
 }

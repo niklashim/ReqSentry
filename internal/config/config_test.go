@@ -31,14 +31,21 @@ func TestLoadExampleAndDefaults(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if cfg.Mode != "monitor" || cfg.Trigger.Mode != "cpu" || len(cfg.AccessFiles) != 2 {
+	if cfg.Mode != "monitor" || cfg.Trigger.Mode != "always" || len(cfg.AccessFiles) != 1 {
 		t.Fatalf("unexpected example config: %+v", cfg)
 	}
 	if cfg.Analysis.Window.Duration != 30*time.Second {
 		t.Fatalf("unexpected analysis window: %s", cfg.Analysis.Window.Duration)
 	}
-	if cfg.AccessFiles[0].Site != "site1" || cfg.AccessFiles[1].Type != "apache" {
+	if cfg.AccessFiles[0].Site != "site1" || cfg.AccessFiles[0].Format != "combined" {
 		t.Fatalf("unexpected access file mapping: %+v", cfg.AccessFiles)
+	}
+	if cfg.Database.Retention.MaxAge.Duration != 96*time.Hour {
+		t.Fatalf("example should retain the shared four-day default: %+v", cfg.Database.Retention)
+	}
+	if cfg.Web.Enabled || cfg.MaxMind.Enabled || cfg.PHPFPM.Enabled || cfg.Recovery.Enabled ||
+		cfg.Output.Log.Enabled || cfg.Output.Incidents.Enabled || cfg.Output.Slack.Enabled || len(cfg.Output.Destinations) != 0 {
+		t.Fatal("commented reference should leave optional integrations disabled")
 	}
 
 	cfg, err = loadText(t, minimalConfig)

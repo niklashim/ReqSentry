@@ -1,1 +1,1 @@
-document.documentElement.dataset.fixture = "him.com";
+document.documentElement.dataset.fixture = "shop.example";

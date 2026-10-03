@@ -26,6 +26,16 @@ type fixtureSource struct {
 	incidents []model.Incident
 }
 
+type countingDashboardSource struct {
+	fixtureSource
+	calls int
+}
+
+func (s *countingDashboardSource) Dashboard(_ time.Duration, _ int) aggregator.DashboardView {
+	s.calls++
+	return s.view
+}
+
 func (f fixtureSource) ServerName() string                                        { return "test-host" }
 func (f fixtureSource) Dashboard(_ time.Duration, _ int) aggregator.DashboardView { return f.view }
 func (f fixtureSource) IPSnapshot(_ string, ip netip.Addr, _ time.Duration) (aggregator.Snapshot, bool) {
@@ -111,6 +121,23 @@ func TestAPIAndAssets(t *testing.T) {
 	}
 	if w := get(t, s, "/api/v1/user-agents"); !strings.Contains(w.Body.String(), `"recent_would_block_ips":1`) {
 		t.Fatalf("User-Agent incident association missing: %s", w.Body.String())
+	}
+}
+
+func TestRoutesWithoutLiveStatsSkipDashboardScan(t *testing.T) {
+	s := apiFixture(t)
+	source := &countingDashboardSource{}
+	s.source = source
+	for _, path := range []string{"/api/v1/server", "/api/v1/phpfpm", "/api/v1/incidents?limit=1", "/api/v1/status"} {
+		if w := get(t, s, path); w.Code != http.StatusOK {
+			t.Fatalf("%s status=%d", path, w.Code)
+		}
+	}
+	if source.calls != 0 {
+		t.Fatalf("unneeded dashboard scans=%d", source.calls)
+	}
+	if w := get(t, s, "/api/v1/stats?range=1m"); w.Code != http.StatusOK || source.calls != 1 {
+		t.Fatalf("live stats status=%d scans=%d", w.Code, source.calls)
 	}
 }
 

@@ -15,23 +15,31 @@ import (
 	"sync"
 	"time"
 
+	"github.com/niklashim/ReqSentry/internal/config"
 	"github.com/niklashim/ReqSentry/internal/model"
 	_ "modernc.org/sqlite"
+	"strings"
 )
 
 var ErrQueueFull = errors.New("SQLite incident queue full")
 var ErrClosed = errors.New("SQLite store closed")
 
 type Store struct {
-	db          *sql.DB
-	readDB      *sql.DB
-	diagnostics io.Writer
-	queue       chan writeRequest
-	done        chan struct{}
-	mu          sync.Mutex
-	closed      bool
-	opMu        sync.RWMutex
-	operational interface {
+	path              string
+	errorQueue        chan model.ErrorEvent
+	errorSampleLimit  int
+	errorSampleSecond int64
+	errorSampleCount  int
+	db                *sql.DB
+	readDB            *sql.DB
+	diagnostics       io.Writer
+	queue             chan writeRequest
+	done              chan struct{}
+	mu                sync.Mutex
+	closed            bool
+	retention         config.RetentionConfig
+	opMu              sync.RWMutex
+	operational       interface {
 		Operational(string, string, uint64) error
 	}
 }
@@ -102,7 +110,7 @@ func Open(path string, diagnostics io.Writer) (*Store, error) {
 		_ = db.Close()
 		return nil, fmt.Errorf("open SQLite dashboard reader: %w", err)
 	}
-	s := &Store{db: db, readDB: readDB, diagnostics: diagnostics, queue: make(chan writeRequest, 256), done: make(chan struct{})}
+	s := &Store{path: path, errorSampleLimit: 20, errorQueue: make(chan model.ErrorEvent, 128), db: db, readDB: readDB, diagnostics: diagnostics, queue: make(chan writeRequest, 256), done: make(chan struct{})}
 	go s.run()
 	return s, nil
 }
@@ -112,8 +120,8 @@ func migrate(db *sql.DB) error {
 	if err := db.QueryRow("PRAGMA user_version").Scan(&version); err != nil {
 		return err
 	}
-	if version > 3 {
-		return fmt.Errorf("SQLite schema version %d is newer than supported version 3", version)
+	if version > 6 {
+		return fmt.Errorf("SQLite schema version %d is newer than supported version 6", version)
 	}
 	tx, err := db.Begin()
 	if err != nil {
@@ -227,6 +235,49 @@ func migrate(db *sql.DB) error {
 			return err
 		}
 	}
+	if version < 4 {
+		for _, statement := range []string{
+			`CREATE TABLE IF NOT EXISTS error_events(id INTEGER PRIMARY KEY,timestamp_ns INTEGER NOT NULL,site_id TEXT NOT NULL,severity TEXT NOT NULL,category TEXT NOT NULL,payload_json TEXT NOT NULL)`,
+			`CREATE INDEX IF NOT EXISTS error_events_site_time ON error_events(site_id,timestamp_ns DESC)`,
+			`CREATE INDEX IF NOT EXISTS error_events_time ON error_events(timestamp_ns DESC)`,
+			`PRAGMA user_version=4`,
+		} {
+			if _, err := tx.Exec(statement); err != nil {
+				return err
+			}
+		}
+	}
+	if version < 5 {
+		has, err := hasColumn(tx, "incidents", "event_id")
+		if err != nil {
+			return err
+		}
+		if !has {
+			if _, err := tx.Exec(`ALTER TABLE incidents ADD COLUMN event_id TEXT`); err != nil {
+				return err
+			}
+		}
+		if _, err := tx.Exec(`CREATE UNIQUE INDEX IF NOT EXISTS incident_event_id ON incidents(event_id) WHERE event_id IS NOT NULL`); err != nil {
+			return err
+		}
+		if _, err := tx.Exec(`PRAGMA user_version=5`); err != nil {
+			return err
+		}
+	}
+	if version < 6 {
+		for _, statement := range []string{
+			`CREATE TABLE IF NOT EXISTS incident_requests(incident_id INTEGER NOT NULL,sample_index INTEGER NOT NULL,timestamp_ns INTEGER NOT NULL,site_id TEXT NOT NULL,ip_address TEXT NOT NULL,method TEXT NOT NULL,status INTEGER NOT NULL,search_text TEXT NOT NULL,payload_json TEXT NOT NULL,PRIMARY KEY(incident_id,sample_index),FOREIGN KEY(incident_id) REFERENCES incidents(id) ON DELETE CASCADE)`,
+			`CREATE INDEX IF NOT EXISTS incident_requests_site_time ON incident_requests(site_id,timestamp_ns DESC)`,
+			`CREATE INDEX IF NOT EXISTS incident_requests_time ON incident_requests(timestamp_ns DESC)`,
+			`CREATE INDEX IF NOT EXISTS incident_ip_time ON incidents(ip_address,timestamp_ns DESC)`,
+			`CREATE INDEX IF NOT EXISTS incident_site_time ON incidents(site_id,timestamp_ns DESC)`,
+			`PRAGMA user_version=6`,
+		} {
+			if _, err := tx.Exec(statement); err != nil {
+				return err
+			}
+		}
+	}
 	return tx.Commit()
 }
 
@@ -273,15 +324,35 @@ func (s *Store) Flush(ctx context.Context) error {
 func (s *Store) run() {
 	defer close(s.done)
 	batch := make([]model.Incident, 0, 64)
+	errorBatch := make([]model.ErrorEvent, 0, 64)
+	errorQueue := s.errorQueue
+	drainErrors := func() {
+		count := len(errorQueue)
+		for i := 0; i < count; i++ {
+			select {
+			case e := <-errorQueue:
+				errorBatch = append(errorBatch, e)
+			default:
+				return
+			}
+		}
+	}
 	var priorError error
 	var consecutive uint64
 	ticker := time.NewTicker(250 * time.Millisecond)
 	defer ticker.Stop()
 	flush := func() error {
-		if len(batch) == 0 {
+		if len(batch) == 0 && len(errorBatch) == 0 {
 			return nil
 		}
-		err := s.insertBatch(batch)
+		var err error
+		if len(batch) > 0 {
+			err = s.insertBatch(batch)
+		}
+		if len(errorBatch) > 0 {
+			err = errors.Join(err, s.insertErrors(errorBatch))
+			errorBatch = errorBatch[:0]
+		}
 		if err != nil {
 			consecutive++
 			priorError = errors.Join(priorError, err)
@@ -300,12 +371,19 @@ func (s *Store) run() {
 	}
 	for {
 		select {
+		case e := <-errorQueue:
+			errorBatch = append(errorBatch, e)
+			if len(errorBatch) >= 64 {
+				_ = flush()
+			}
 		case request, ok := <-s.queue:
 			if !ok {
+				drainErrors()
 				_ = flush()
 				return
 			}
 			if request.barrier != nil {
+				drainErrors()
 				_ = flush()
 				request.barrier <- priorError
 				priorError = nil
@@ -328,6 +406,9 @@ func (s *Store) insertBatch(batch []model.Incident) error {
 	}
 	defer tx.Rollback()
 	for _, incident := range batch {
+		if len(incident.RequestSamples) > model.MaxRequestSamples {
+			incident.RequestSamples = incident.RequestSamples[:model.MaxRequestSamples]
+		}
 		payload, err := json.Marshal(incident)
 		if err != nil {
 			return err
@@ -339,10 +420,13 @@ func (s *Store) insertBatch(batch []model.Incident) error {
 		if _, err := tx.Exec(`INSERT OR IGNORE INTO ips(address) VALUES(?)`, ip); err != nil {
 			return err
 		}
-		result, err := tx.Exec(`INSERT INTO incidents(timestamp,timestamp_ns,site_id,ip_address,score,decision,ruleset_version,payload_json) VALUES(?,?,?,?,?,?,?,?)`,
-			incident.Timestamp.UTC().Format(time.RFC3339Nano), incident.Timestamp.UnixNano(), incident.SiteID, ip, incident.Score, incident.Decision, incident.RulesetVersion, string(payload))
+		result, err := tx.Exec(`INSERT OR IGNORE INTO incidents(timestamp,timestamp_ns,site_id,ip_address,score,decision,ruleset_version,payload_json,event_id) VALUES(?,?,?,?,?,?,?,?,?)`,
+			incident.Timestamp.UTC().Format(time.RFC3339Nano), incident.Timestamp.UnixNano(), incident.SiteID, ip, incident.Score, incident.Decision, incident.RulesetVersion, string(payload), nullableEventID(incident.EventID))
 		if err != nil {
 			return err
+		}
+		if count, _ := result.RowsAffected(); count == 0 {
+			continue
 		}
 		id, err := result.LastInsertId()
 		if err != nil {
@@ -350,6 +434,16 @@ func (s *Store) insertBatch(batch []model.Incident) error {
 		}
 		for _, signal := range incident.Signals {
 			if _, err := tx.Exec(`INSERT OR IGNORE INTO incident_signals(incident_id,code) VALUES(?,?)`, id, signal.Code); err != nil {
+				return err
+			}
+		}
+		for index, sample := range incident.RequestSamples {
+			payload, err := json.Marshal(sample)
+			if err != nil {
+				return err
+			}
+			search := strings.Join([]string{sample.Method, sample.Path, sample.RequestID, sample.TraceID, sample.ClientIP.String()}, " ")
+			if _, err := tx.Exec(`INSERT INTO incident_requests(incident_id,sample_index,timestamp_ns,site_id,ip_address,method,status,search_text,payload_json) VALUES(?,?,?,?,?,?,?,?,?)`, id, index, sample.Timestamp.UnixNano(), sample.SiteID, sample.ClientIP.Unmap().String(), sample.Method, sample.Status, search, string(payload)); err != nil {
 				return err
 			}
 		}
@@ -365,7 +459,7 @@ func (s *Store) RecentIncidents(ctx context.Context, limit int) ([]model.Inciden
 	if limit < 1 || limit > 1000 {
 		return nil, errors.New("incident limit must be between 1 and 1000")
 	}
-	rows, err := s.db.QueryContext(ctx, `SELECT payload_json FROM incidents ORDER BY id DESC LIMIT ?`, limit)
+	rows, err := s.readDB.QueryContext(ctx, `SELECT payload_json FROM incidents WHERE timestamp_ns>=? ORDER BY id DESC LIMIT ?`, s.retainedFrom(time.Time{}, "incidents").UnixNano(), limit)
 	if err != nil {
 		return nil, err
 	}
@@ -436,4 +530,32 @@ func (s *Store) Close() error {
 	<-s.done
 	readErr := s.readDB.Close()
 	return errors.Join(readErr, s.db.Close())
+}
+
+func nullableEventID(value string) any {
+	if value == "" {
+		return nil
+	}
+	return value
+}
+
+func hasColumn(tx *sql.Tx, table, column string) (bool, error) {
+	rows, err := tx.Query("PRAGMA table_info(" + table + ")")
+	if err != nil {
+		return false, err
+	}
+	defer rows.Close()
+	found := false
+	for rows.Next() {
+		var id, required, primary int
+		var name, kind string
+		var defaultValue sql.NullString
+		if err := rows.Scan(&id, &name, &kind, &required, &defaultValue, &primary); err != nil {
+			return false, err
+		}
+		if name == column {
+			found = true
+		}
+	}
+	return found, rows.Err()
 }

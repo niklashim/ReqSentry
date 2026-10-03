@@ -1,3 +1,4 @@
+// Package config loads and validates ReqSentry's monitor-only daemon settings.
 package config
 
 import (
@@ -38,9 +39,15 @@ func (d *Duration) UnmarshalYAML(node *yaml.Node) error {
 }
 
 type AccessFile struct {
-	Path string `yaml:"path"`
-	Site string `yaml:"site"`
-	Type string `yaml:"type"`
+	Path             string `yaml:"path"`
+	Site             string `yaml:"site"`
+	Type             string `yaml:"type"`
+	Format           string `yaml:"format"`
+	Profile          string `yaml:"profile"`
+	Timezone         string `yaml:"timezone"`
+	MinimumSeverity  string `yaml:"minimum_severity"`
+	RetainStackTrace bool   `yaml:"retain_stack_trace"`
+	Kind             string `yaml:"-"`
 }
 
 // Access files may use the paths in the original brief or an explicit mapping.
@@ -67,6 +74,18 @@ func (a *AccessFile) UnmarshalYAML(node *yaml.Node) error {
 				a.Site = value.Value
 			case "type":
 				a.Type = value.Value
+			case "format":
+				a.Format = value.Value
+			case "profile":
+				a.Profile = value.Value
+			case "timezone":
+				a.Timezone = value.Value
+			case "retain_stack_trace":
+				if err := value.Decode(&a.RetainStackTrace); err != nil {
+					return fmt.Errorf("retain_stack_trace must be boolean")
+				}
+			case "minimum_severity":
+				a.MinimumSeverity = value.Value
 			default:
 				return fmt.Errorf("unknown access file field %q", key)
 			}
@@ -78,21 +97,25 @@ func (a *AccessFile) UnmarshalYAML(node *yaml.Node) error {
 }
 
 type Config struct {
-	Server      ServerConfig      `yaml:"server"`
-	Mode        string            `yaml:"mode"`
-	AccessFiles []AccessFile      `yaml:"access_files"`
-	ClientIP    ClientIPConfig    `yaml:"client_ip"`
-	Allowlist   []string          `yaml:"allowlist"`
-	Trigger     TriggerConfig     `yaml:"trigger"`
-	Analysis    AnalysisConfig    `yaml:"analysis"`
-	Aggregation AggregationConfig `yaml:"aggregation"`
-	Health      HealthConfig      `yaml:"health"`
-	PHPFPM      PHPFPMConfig      `yaml:"php_fpm"`
-	Detection   DetectionConfig   `yaml:"detection"`
-	Database    DatabaseConfig    `yaml:"database"`
-	MaxMind     MaxMindConfig     `yaml:"maxmind"`
-	Output      OutputConfig      `yaml:"output"`
-	Web         WebConfig         `yaml:"web"`
+	Server      ServerConfig          `yaml:"server"`
+	Mode        string                `yaml:"mode"`
+	AccessFiles []AccessFile          `yaml:"access_files"`
+	ErrorFiles  []AccessFile          `yaml:"error_files"`
+	LogProfiles map[string]LogProfile `yaml:"log_profiles"`
+	Correlation CorrelationConfig     `yaml:"correlation"`
+	Recovery    RecoveryConfig        `yaml:"recovery"`
+	ClientIP    ClientIPConfig        `yaml:"client_ip"`
+	Allowlist   []string              `yaml:"allowlist"`
+	Trigger     TriggerConfig         `yaml:"trigger"`
+	Analysis    AnalysisConfig        `yaml:"analysis"`
+	Aggregation AggregationConfig     `yaml:"aggregation"`
+	Health      HealthConfig          `yaml:"health"`
+	PHPFPM      PHPFPMConfig          `yaml:"php_fpm"`
+	Detection   DetectionConfig       `yaml:"detection"`
+	Database    DatabaseConfig        `yaml:"database"`
+	MaxMind     MaxMindConfig         `yaml:"maxmind"`
+	Output      OutputConfig          `yaml:"output"`
+	Web         WebConfig             `yaml:"web"`
 }
 
 type WebConfig struct {
@@ -166,7 +189,8 @@ type PHPFPMPoolConfig struct {
 }
 
 type DatabaseConfig struct {
-	Path string `yaml:"path"`
+	Path      string          `yaml:"path"`
+	Retention RetentionConfig `yaml:"retention"`
 }
 
 type MaxMindConfig struct {
@@ -185,9 +209,10 @@ type MaxMindUpdateConfig struct {
 }
 
 type OutputConfig struct {
-	Log       FileOutputConfig  `yaml:"log"`
-	Incidents FileOutputConfig  `yaml:"incidents"`
-	Slack     SlackOutputConfig `yaml:"slack"`
+	Log          FileOutputConfig    `yaml:"log"`
+	Incidents    FileOutputConfig    `yaml:"incidents"`
+	Slack        SlackOutputConfig   `yaml:"slack"`
+	Destinations []DestinationConfig `yaml:"destinations"`
 }
 
 type FileOutputConfig struct {
@@ -483,7 +508,7 @@ func (c *Config) Validate() error {
 			return errors.New("web.realtime.max_clients must be 1 to 256")
 		}
 	}
-	return nil
+	return c.validateExtensions()
 }
 
 func absolutePath(name, path string) error {

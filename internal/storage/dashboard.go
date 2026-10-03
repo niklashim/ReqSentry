@@ -87,16 +87,17 @@ func (s *Store) SaveDashboardMinutes(ctx context.Context, samples []HistorySampl
 			return err
 		}
 	}
-	_, err = tx.ExecContext(ctx, `DELETE FROM dashboard_minutes WHERE bucket_start < ?`, time.Now().Add(-7*24*time.Hour).UTC().Unix())
-	if err != nil {
-		return err
-	}
+	// Retention runs in the bounded maintenance worker, outside this write.
 	return tx.Commit()
 }
 
 func (s *Store) DashboardHistory(ctx context.Context, site string, from, to time.Time, maxPoints int) ([]HistorySample, error) {
 	if maxPoints < 1 || maxPoints > 500 || to.Before(from) || to.Sub(from) > 7*24*time.Hour {
 		return nil, errors.New("dashboard history range or point limit invalid")
+	}
+	from = s.retainedFrom(from, "minutes")
+	if from.After(to) {
+		return nil, nil
 	}
 	start := from.UTC().Truncate(time.Minute)
 	end := to.UTC().Truncate(time.Minute)
@@ -203,6 +204,8 @@ type IncidentFilter struct {
 	MinScore int
 	MaxScore int
 	Signal   string
+	Server   string
+	Query    string
 	Limit    int
 	Offset   int
 }
@@ -213,9 +216,10 @@ type StoredIncident struct {
 }
 
 func (s *Store) SearchIncidents(ctx context.Context, filter IncidentFilter) ([]StoredIncident, int, error) {
-	if filter.Limit < 1 || filter.Limit > 100 || filter.Offset < 0 || filter.Offset > 10000 || filter.MinScore < 0 || filter.MaxScore > 100 || filter.MinScore > filter.MaxScore || filter.To.Before(filter.From) || filter.To.Sub(filter.From) > 7*24*time.Hour {
+	if filter.Limit < 1 || filter.Limit > 100 || filter.Offset < 0 || filter.Offset > 10000 || filter.MinScore < 0 || filter.MaxScore > 100 || filter.MinScore > filter.MaxScore || filter.To.Before(filter.From) || filter.To.Sub(filter.From) > 366*24*time.Hour {
 		return nil, 0, errors.New("invalid incident filter")
 	}
+	filter.From = s.retainedFrom(filter.From, "incidents")
 	var conditions []string
 	var args []any
 	if !filter.From.IsZero() {
@@ -243,6 +247,17 @@ func (s *Store) SearchIncidents(ctx context.Context, filter IncidentFilter) ([]S
 	if filter.Signal != "" {
 		conditions = append(conditions, "EXISTS (SELECT 1 FROM incident_signals WHERE incident_id=incidents.id AND code=?)")
 		args = append(args, filter.Signal)
+	}
+	if len(filter.Query) > 256 || len(filter.Server) > 128 {
+		return nil, 0, errors.New("invalid incident text filter")
+	}
+	if filter.Server != "" {
+		conditions = append(conditions, "json_extract(payload_json,'$.server')=?")
+		args = append(args, filter.Server)
+	}
+	if filter.Query != "" {
+		conditions = append(conditions, "EXISTS (SELECT 1 FROM incident_requests WHERE incident_id=incidents.id AND instr(lower(search_text),lower(?))>0)")
+		args = append(args, filter.Query)
 	}
 	where := " WHERE " + strings.Join(conditions, " AND ")
 	var count int
@@ -276,7 +291,7 @@ func (s *Store) IncidentByID(ctx context.Context, id int64) (StoredIncident, boo
 	}
 	var item StoredIncident
 	var payload string
-	err := s.readDB.QueryRowContext(ctx, `SELECT id,payload_json FROM incidents WHERE id=?`, id).Scan(&item.ID, &payload)
+	err := s.readDB.QueryRowContext(ctx, `SELECT id,payload_json FROM incidents WHERE id=? AND timestamp_ns>=?`, id, s.retainedFrom(time.Time{}, "incidents").UnixNano()).Scan(&item.ID, &payload)
 	if errors.Is(err, sql.ErrNoRows) {
 		return StoredIncident{}, false, nil
 	}

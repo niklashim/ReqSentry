@@ -1,1 +1,1 @@
-document.documentElement.dataset.fixture = "ekstrom.nu";
+document.documentElement.dataset.fixture = "docs.example";

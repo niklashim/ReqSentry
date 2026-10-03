@@ -15,6 +15,8 @@ sudo install -o root -g reqsentry -m 0640 configs/example.yaml /etc/reqsentry/co
 sudo install -d -o reqsentry -g reqsentry -m 0750 /var/lib/reqsentry /var/lib/reqsentry/maxmind /var/log/reqsentry
 ```
 
+The [configuration example](../configs/example.yaml) is a complete commented reference. Only the required server identity, access-log path, and database path are active; all optional settings are listed with defaults or labeled example values. Uncomment the settings you need together with their parent blocks, preserving indentation. Nested comments remain optional, and environment/systemd secret references are alternatives: choose one. The default retention ceiling is four days even when its block is left commented.
+
 Edit `/etc/reqsentry/config.yaml` for the host's absolute log paths, site names, trigger, and optional integrations. Give the `reqsentry` account read access only to the configured access logs and their directories. A dedicated read-only ACL is usually preferable to adding it to a broad web server group:
 
 ```sh

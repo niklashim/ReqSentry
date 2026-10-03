@@ -28,10 +28,22 @@ type File struct {
 	mu          sync.Mutex
 	closed      bool
 	dropped     uint64
+	retention   *fileRetention
 }
 
 func NewFile(path string, diagnostics io.Writer) *File {
+	return newFile(path, diagnostics, nil)
+}
+
+// NewRetainedFile applies the same history ceiling to locally owned output.
+// kind is "incidents" (JSONL) or "operational" (standard logger timestamps).
+func NewRetainedFile(path string, diagnostics io.Writer, age time.Duration, kind string) *File {
+	return newFile(path, diagnostics, &fileRetention{age: age, kind: kind})
+}
+
+func newFile(path string, diagnostics io.Writer, retention *fileRetention) *File {
 	f := &File{path: path, diagnostics: diagnostics, queue: make(chan []byte, 256), done: make(chan struct{})}
+	f.retention = retention
 	go f.run()
 	return f
 }
@@ -83,7 +95,70 @@ func (f *File) run() {
 		}
 	}()
 	var failures uint64
-	for record := range f.queue {
+	ticker := time.NewTicker(time.Minute)
+	defer ticker.Stop()
+	var earliest, latest time.Time
+	hour := time.Now().Truncate(time.Hour)
+	maintain := func(now time.Time) {
+		if f.retention == nil {
+			return
+		}
+		if active == nil && earliest.IsZero() {
+			lo, hi, err := f.retention.pruneFile(f.path, now)
+			if err != nil {
+				fmt.Fprintf(f.diagnostics, "ReqSentry output retention failed path=%s: %v\n", f.path, err)
+			} else {
+				earliest, latest = lo, hi
+				if !lo.IsZero() && lo.Before(hour) {
+					hour = lo.Truncate(time.Hour)
+				}
+			}
+		}
+		if !earliest.IsZero() && (!now.Truncate(time.Hour).Equal(hour) || earliest.Before(now.Add(-f.retention.age))) {
+			if active != nil {
+				_ = active.Close()
+				active = nil
+			}
+			if err := f.retention.rotate(f.path, earliest, latest); err != nil {
+				fmt.Fprintf(f.diagnostics, "ReqSentry output rotation failed path=%s: %v\n", f.path, err)
+			} else {
+				earliest, latest = time.Time{}, time.Time{}
+				hour = now.Truncate(time.Hour)
+			}
+		}
+		if err := f.retention.pruneArchives(f.path, now); err != nil {
+			fmt.Fprintf(f.diagnostics, "ReqSentry output retention failed path=%s: %v\n", f.path, err)
+		}
+	}
+	maintain(time.Now())
+	for {
+		var record []byte
+		select {
+		case <-ticker.C:
+			maintain(time.Now())
+			continue
+		case v, ok := <-f.queue:
+			if !ok {
+				return
+			}
+			record = v
+		}
+		now := time.Now()
+		var recordedAt time.Time
+		if f.retention != nil {
+			var err error
+			recordedAt, err = f.retention.recordTime(record)
+			if err != nil {
+				fmt.Fprintf(f.diagnostics, "ReqSentry output rejected undated record path=%s\n", f.path)
+				continue
+			}
+			if recordedAt.Before(now.Add(-f.retention.age)) {
+				continue
+			}
+			if !now.Truncate(time.Hour).Equal(hour) {
+				maintain(now)
+			}
+		}
 		if active != nil {
 			current, pathErr := os.Stat(f.path)
 			opened, fileErr := active.Stat()
@@ -93,6 +168,22 @@ func (f *File) run() {
 			}
 		}
 		if active == nil {
+			if f.retention != nil {
+				lo, hi, err := f.retention.pruneFile(f.path, now)
+				if err != nil {
+					fmt.Fprintf(f.diagnostics, "ReqSentry output retention failed path=%s: %v\n", f.path, err)
+					continue
+				}
+				earliest, latest = lo, hi
+				if !lo.IsZero() && lo.Before(now.Truncate(time.Hour)) {
+					if err := f.retention.rotate(f.path, lo, hi); err != nil {
+						fmt.Fprintf(f.diagnostics, "ReqSentry output rotation failed path=%s: %v\n", f.path, err)
+						continue
+					}
+					earliest, latest = time.Time{}, time.Time{}
+				}
+				hour = now.Truncate(time.Hour)
+			}
 			var err error
 			active, err = os.OpenFile(f.path, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0600)
 			if err != nil {
@@ -111,6 +202,14 @@ func (f *File) run() {
 			_ = active.Close()
 			active = nil
 			continue
+		}
+		if !recordedAt.IsZero() {
+			if earliest.IsZero() || recordedAt.Before(earliest) {
+				earliest = recordedAt
+			}
+			if latest.IsZero() || recordedAt.After(latest) {
+				latest = recordedAt
+			}
 		}
 		if failures > 0 {
 			fmt.Fprintf(f.diagnostics, "ReqSentry output recovered path=%s at=%s\n", f.path, time.Now().Format(time.RFC3339))

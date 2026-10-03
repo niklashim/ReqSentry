@@ -36,6 +36,7 @@ type Saturation struct {
 }
 
 type Snapshot struct {
+	RequestSamples       []model.RequestSample
 	SiteID               string
 	ClientIP             netip.Addr
 	Window               time.Duration
@@ -85,17 +86,18 @@ type Identity struct {
 }
 
 type Aggregator struct {
-	mu         sync.Mutex
-	limits     config.AggregationConfig
-	records    map[key]*record
-	totals     [bucketCount]totalBucket
-	siteTotals map[string]*[bucketCount]totalBucket
-	drops      [bucketCount]totalBucket
-	latest     int64
-	lastPrune  int64
-	dropped    uint64
-	oldEvents  uint64
-	degraded   bool
+	sampleSeconds int64
+	mu            sync.Mutex
+	limits        config.AggregationConfig
+	records       map[key]*record
+	totals        [bucketCount]totalBucket
+	siteTotals    map[string]*[bucketCount]totalBucket
+	drops         [bucketCount]totalBucket
+	latest        int64
+	lastPrune     int64
+	dropped       uint64
+	oldEvents     uint64
+	degraded      bool
 }
 
 type totalBucket struct {
@@ -130,6 +132,7 @@ func (m *MethodHTTP) add(other MethodHTTP) {
 }
 
 type record struct {
+	samples          [2]sampleEpoch
 	lastSeen         int64
 	lastExpired      int64
 	lastUA           string
@@ -175,8 +178,12 @@ type bucket struct {
 	saturation      Saturation
 }
 
-func New(limits config.AggregationConfig) *Aggregator {
-	return &Aggregator{limits: limits, records: make(map[key]*record), siteTotals: make(map[string]*[bucketCount]totalBucket)}
+func New(limits config.AggregationConfig, sampleWindow ...time.Duration) *Aggregator {
+	seconds := int64(60)
+	if len(sampleWindow) > 0 && sampleWindow[0] >= time.Second && sampleWindow[0] <= time.Minute {
+		seconds = int64(sampleWindow[0] / time.Second)
+	}
+	return &Aggregator{sampleSeconds: seconds, limits: limits, records: make(map[key]*record), siteTotals: make(map[string]*[bucketCount]totalBucket)}
 }
 
 // Observe counts every parsed request in the server total. An allowlisted
@@ -230,6 +237,10 @@ func (a *Aggregator) Observe(event model.RequestEvent, allowlisted bool, at time
 		counter.requests++
 		return false
 	}
+	var requestSample model.RequestSample
+	if !a.degraded && a.sampleSeconds > 0 {
+		requestSample = model.SampleRequest(event)
+	}
 	for _, id := range []key{globalKey, siteKey} {
 		rec := a.records[id]
 		if rec == nil {
@@ -240,6 +251,9 @@ func (a *Aggregator) Observe(event model.RequestEvent, allowlisted bool, at time
 			a.records[id] = rec
 		}
 		rec.add(event, second, a.limits, a.degraded)
+		if !a.degraded && a.sampleSeconds > 0 {
+			rec.sample(requestSample, at, a.sampleSeconds)
+		}
 	}
 	return true
 }
@@ -296,6 +310,7 @@ func (a *Aggregator) Snapshot(site string, ip netip.Addr, window time.Duration, 
 		return result, false
 	}
 	cutoff := at.Unix() - seconds + 1
+	result.RequestSamples = rec.requestSamples(cutoff, at)
 	paths := make(map[string]struct{})
 	missing := make(map[string]struct{})
 	agents := make(map[string]struct{})
@@ -542,19 +557,32 @@ func (r *record) add(event model.RequestEvent, second int64, limits config.Aggre
 	if degraded {
 		return
 	}
-	path := CanonicalPath(event.Path)
+	// Reject oversized evidence before canonicalization or query parsing. A
+	// single hostile access-log line may otherwise be much larger than the
+	// configured per-value retention limit.
+	path := ""
+	if len(event.Path) <= limits.MaxValueBytes {
+		path = CanonicalPath(event.Path)
+	} else {
+		b.saturation.Paths = true
+		if event.Status == 404 {
+			b.saturation.MissingPaths = true
+		}
+	}
 	followKey := path
-	if event.Query != "" {
+	if path != "" && event.Query != "" && len(event.Query) <= limits.MaxValueBytes {
 		if values, err := url.ParseQuery(event.Query); err == nil {
 			followKey += "?" + values.Encode()
 		}
 	}
-	if _, found := r.pendingRedirects[followKey]; found {
-		b.redirectFollows++
-		delete(r.pendingRedirects, followKey)
-	} else if _, found := r.pendingRedirects[path]; found {
-		b.redirectFollows++
-		delete(r.pendingRedirects, path)
+	if path != "" {
+		if _, found := r.pendingRedirects[followKey]; found {
+			b.redirectFollows++
+			delete(r.pendingRedirects, followKey)
+		} else if _, found := r.pendingRedirects[path]; found {
+			b.redirectFollows++
+			delete(r.pendingRedirects, path)
+		}
 	}
 	if (event.Status == 301 || event.Status == 302) && event.Location != nil {
 		if target := redirectTarget(*event.Location, event.Host, limits.MaxValueBytes); target != "" {
@@ -578,7 +606,7 @@ func (r *record) add(event model.RequestEvent, second int64, limits config.Aggre
 		}
 	}
 	if event.Query != "" {
-		if len(event.Query) > limits.MaxValueBytes {
+		if len(event.Query) > limits.MaxValueBytes || path == "" {
 			b.saturation.QueryPatterns = true
 		} else {
 			addBounded(queryPattern(path, event.Query), &b.queries, r.queries, limits.MaxQueriesPerIP, limits.MaxValueBytes, &b.saturation.QueryPatterns)

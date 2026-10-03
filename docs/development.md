@@ -2,14 +2,15 @@
 
 Run the commands on this page from the repository root unless a section says otherwise.
 
-**Current status:** V1 implementation is substantially complete; production validation remains open. The [original project brief](project-brief.md) is retained as a design reference. The Go daemon follows multiple Nginx/Apache access logs, resolves trusted client IPs, keeps bounded rolling counters with a degraded mode, samples Linux health, and can poll local PHP-FPM status pages. It produces explainable monitor-only decisions, stores incident history and restart offsets in SQLite, writes JSONL incidents and operational logs, enriches incidents from local MaxMind MMDB files, schedules authenticated MMDB updates, and optionally sends Slack alerts. A Linux systemd unit, operator CLI, and historical replay are included. No V1 component changes web traffic or blocks clients.
+**Current status:** V1 implementation is substantially complete; production validation remains open. The [original project brief](project-brief.md) is retained as a design reference. The Go daemon follows multiple Nginx/Apache access logs, resolves trusted client IPs, keeps bounded rolling counters with a degraded mode, samples Linux health, and can poll local PHP-FPM status pages. It produces explainable monitor-only decisions, stores incident history and restart offsets in SQLite, writes JSONL incidents and operational logs, enriches incidents from local MaxMind MMDB files, schedules authenticated MMDB updates, and optionally sends Slack/Teams/SNS alerts, consumes JSON/logfmt access logs and mapped application errors, and saves bounded error correlation context. A Linux systemd unit, operator CLI, and historical replay are included. No V1 component changes web traffic or blocks clients.
 
 Implementation work is tracked in the [`Tickets/` backlog](../Tickets/README.md):
 
 - [Tickets/README.md](../Tickets/README.md) indexes the original 24 tickets and dashboard tickets 025–041, with dependencies and archive links.
 - Tickets 001–020 are implemented and filed in [`Tickets/archive/`](../Tickets/archive/). Ticket 021 includes replay, synthetic tests, and local benchmarks, with a representative production-log false-positive review and sustained Linux host measurements still pending. Each ticket lists acceptance criteria.
-- Tickets 022–024 cover later ideas, including automatic triggers, historical tuning, and potential Cloudflare enforcement. Enforcement is explicitly outside V1.
+- Tickets 022–024 are archived as deferred proposals, including automatic triggers, historical tuning, and potential Cloudflare enforcement. They were not implemented; enforcement is explicitly outside V1.
 - Ticket status is kept in each ticket and summarized in the index; completed tickets move to `Tickets/archive/`.
+- Monitor-only improvements **055–069** cover Teams/SNS notifications, JSON/logfmt inputs and field mappings, error-log correlation and dashboard evidence, retention, crash recovery, and searchable request samples capped at five per incident. History and ReqSentry’s local output files default to a shared four-day retention ceiling. Their implementation status is indexed in [product improvements](../Tickets/README.md#product-improvements); they do not replace the production evidence required for closing V1 validation ticket 021.
 
 ## Optional dashboard
 
@@ -26,11 +27,11 @@ go test ./...
 go run ./cmd/reqsentry -config configs/example.yaml config test
 ```
 
-Run `go run ./cmd/reqsentry -config /absolute/path/config.yaml` to start the monitor; the sample config's `/var/...` paths need adaptation to the host. The example uses a CPU trigger, so analysis starts when that trigger activates; set `trigger.mode: always` to inspect continuous decisions during development. `status`, `report`, `maxmind status`, and `maxmind update` are local operator commands after `-config PATH`. Use `replay LOG...` for historical combined-format logs; it emits incident JSON lines and a summary without network integrations. The service is not yet validated for production deployment because [ticket 021](../Tickets/021-replay-validation.md) still requires representative log review and sustained measurements on the target Linux server.
+Run `go run ./cmd/reqsentry -config /absolute/path/config.yaml` to start the monitor; the sample config's `/var/...` paths need adaptation to the host. The example defaults to continuous analysis (`trigger.mode: always`); its optional settings are commented out and can be enabled individually. `status`, `report`, `maxmind status`, and `maxmind update` are local operator commands after `-config PATH`. Use `replay LOG...` for historical combined-format logs; it emits incident JSON lines and a summary without network integrations. The service is not yet validated for production deployment because [ticket 021](../Tickets/021-replay-validation.md) still requires representative log review and sustained measurements on the target Linux server.
 
 ## Local Docker development
 
-The primary development environment runs **Nginx and ReqSentry in the same Linux container**. A separate persistent k6 container generates traffic against Nginx; ReqSentry reads four real local access logs. This mirrors the initial same-server Linux deployment model. The container process supervisor is for development only. [Local environment tickets 042–052 and 054](../Tickets/README.md) are complete and archived; the separate sidecar idea is a future ticket. Docker and Docker Compose are required on the development host; k6 itself runs only in its container. There is no Makefile.
+The primary development environment runs **Nginx and ReqSentry in the same Linux container**. A separate persistent k6 container generates traffic against Nginx; ReqSentry reads four real local access logs. This mirrors the initial same-server Linux deployment model. The container process supervisor is for development only. [Local environment tickets 042–052 and 054](../Tickets/README.md) are complete and archived; the separate sidecar idea was closed as deferred. Docker and Docker Compose are required on the development host; k6 itself runs only in its container. There is no Makefile.
 
 ### Start and stop
 
@@ -40,7 +41,7 @@ docker compose ps
 docker compose down
 ```
 
-Open [him.com](http://localhost:8081), [mycoolshop.se](http://localhost:8082), [ekstrom.nu](http://localhost:8083), [wordpress-site.com](http://localhost:8084), and the [ReqSentry dashboard](http://localhost:8090). These are local fixture URLs; no DNS setup is needed. All five published ports bind to host loopback. Compose keeps `reqsentry-k6` running so tests launch with `docker exec`. The checked-in [local example YAML](../configs/config.local.example.yaml) is copied into the image and uses `mode: monitor`, `trigger.mode: always`, all four Nginx access logs, disabled Slack/MaxMind, and a **development-only** Docker bridge allowlist for the dashboard. Production dashboard defaults remain disabled and deny by default.
+Open [shop.example](http://localhost:8081), [api.example](http://localhost:8082), [docs.example](http://localhost:8083), [blog.example](http://localhost:8084), and the [ReqSentry dashboard](http://localhost:8090). These are local fixture URLs; no DNS setup is needed. All five published ports bind to host loopback. Compose keeps `reqsentry-k6` running so tests launch with `docker exec`. The checked-in [local example YAML](../configs/config.local.example.yaml) is copied into the image and uses `mode: monitor`, `trigger.mode: always`, all four Nginx access logs, disabled Slack/MaxMind, and a **development-only** Docker bridge allowlist for the dashboard. Production dashboard defaults remain disabled and deny by default.
 
 The IP explorer lists the site names each tracked IP reached during the rolling minute, with links to site details. An incident with no site ID is a server-wide decision and appears as **All sites**. Older saved incidents retain their original `site1` or `site2` IDs; the new example names apply to newly ingested traffic.
 
@@ -55,6 +56,7 @@ docker exec reqsentry-k6 k6 run /scripts/scenarios/redirects.js
 docker exec reqsentry-k6 k6 run /scripts/scenarios/user-agents.js
 docker exec reqsentry-k6 k6 run /scripts/scenarios/cross-site.js
 docker exec reqsentry-k6 k6 run /scripts/scenarios/high-rate.js
+docker exec reqsentry-k6 k6 run /scripts/scenarios/dashboard-stress.js
 ```
 
 For deliberate higher load, pass `RATE` and `DURATION` directly to the k6 container:
@@ -64,7 +66,7 @@ docker exec -e RATE=500 -e DURATION=30s reqsentry-k6 \
   k6 run /scripts/scenarios/high-rate.js
 ```
 
-The safe default is 20 requests/second for 10 seconds. [k6 scenario details](../tests/k6/README.md) list fixed paths, request counts, expected responses, tags, and likely detector evidence. Scenarios use Docker-network Nginx URLs; they never send load to the ReqSentry dashboard.
+The safe default is 20 requests/second for 10 seconds. [k6 scenario details](../tests/k6/README.md) list fixed paths, request counts, expected responses, tags, and likely detector evidence. Traffic scenarios use Docker-network Nginx URLs. The dashboard stress scenario also reads dashboard APIs concurrently.
 
 ### Inspect logs and state
 
@@ -122,6 +124,10 @@ No credentials are needed for the base environment. Copy `.env.example` to `.env
 
 ### Verified local smoke run
 
-On 2026-10-01, the stack built on Docker Desktop for macOS arm64. Both sites and the dashboard returned HTTP 200, and all eight k6 scenarios passed their response checks. A separate `RATE=50 DURATION=3s` run completed 151 requests with no failed checks. Host-mounted logs contained traffic from both sites and the same k6 source IP; ReqSentry saved five monitor-only incidents during the fixture run, including `WOULD_BLOCK` evidence, and the dashboard API served live statistics, incident history, minute history, and SSE updates. A clean restart and image rebuild preserved the incident database and saved watcher offsets. Rotating the site1 access log created a new file, and ReqSentry reported the rotation while consuming subsequent traffic. Stopping either supervised process made the web container exit with status 1; `docker compose up -d` restored it to healthy. These checks cover the local development workflow; sustained production Linux load validation remains in [ticket 040](../Tickets/040-dashboard-hardening.md).
+On 2026-10-01, the stack built on Docker Desktop for macOS arm64. Both sites and the dashboard returned HTTP 200, and all eight k6 scenarios passed their response checks. A separate `RATE=50 DURATION=3s` run completed 151 requests with no failed checks. Host-mounted logs contained traffic from both sites and the same k6 source IP; ReqSentry saved five monitor-only incidents during the fixture run, including `WOULD_BLOCK` evidence, and the dashboard API served live statistics, incident history, minute history, and SSE updates. A clean restart and image rebuild preserved the incident database and saved watcher offsets. Rotating the site1 access log created a new file, and ReqSentry reported the rotation while consuming subsequent traffic. Stopping either supervised process made the web container exit with status 1; `docker compose up -d` restored it to healthy. These checks cover the local development workflow; sustained production Linux load validation remains in [ticket 021](../Tickets/021-replay-validation.md).
 
 The four-domain fixture was rebuilt and verified on 2026-10-01. All four site URLs and the dashboard health check returned successfully. The normal and cross-site k6 scenarios produced a single tracked source IP whose `/api/v1/ips` row listed all four domains. All eight scenarios passed their response checks, and each site's access log recorded its matching example `Host` header. The existing SQLite incident history survived the rebuild and new incidents used the domain IDs.
+
+On 2026-10-02, the repeat eight-scenario k6 run passed 1,097 response checks across 1,105 requests and saved five more monitor-only incidents. A separate concurrent Nginx/dashboard stress run is recorded in [dashboard limits](dashboard.md). The [architecture guide](architecture.md) maps the code packages and describes the change workflow.
+
+The local fixture now follows all four Nginx error logs and records generated request IDs in combined access logs. The Nginx configuration also defines an optional `reqsentry_json` format; change a site’s producer directive and ReqSentry source format together, and start a fresh log file rather than mixing formats in an existing persistent file. See the [enhancement example](../configs/enhancements.example.yaml) and [structured/error guides](structured-logs.md).

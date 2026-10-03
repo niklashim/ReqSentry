@@ -14,6 +14,7 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unicode/utf8"
 
 	"github.com/niklashim/ReqSentry/internal/config"
 	"github.com/niklashim/ReqSentry/internal/model"
@@ -80,8 +81,12 @@ func formatIncident(incident model.Incident, codes []string) string {
 	if len(codes) > 4 {
 		codes = codes[:4]
 	}
+	site := incident.SiteID
+	if site == "" {
+		site = "All sites"
+	}
 	text := fmt.Sprintf("ReqSentry incident | server=%s site=%s ip=%s | window=%s–%s | requests=%d peak_rps=%d | evidence=%s | score=%d decision=%s",
-		clip(incident.Server, 80), clip(incident.SiteID, 80), incident.ClientIP, incident.WindowStart.UTC().Format(time.RFC3339), incident.WindowEnd.UTC().Format(time.RFC3339), incident.Requests, incident.PeakRPS, strings.Join(codes, ","), incident.Score, incident.Decision)
+		clip(incident.Server, 80), clip(site, 80), incident.ClientIP, incident.WindowStart.UTC().Format(time.RFC3339), incident.WindowEnd.UTC().Format(time.RFC3339), incident.Requests, incident.PeakRPS, strings.Join(codes, ","), incident.Score, incident.Decision)
 	if incident.CPUPercent != nil {
 		text += fmt.Sprintf(" | cpu=%.1f%%", *incident.CPUPercent)
 	}
@@ -97,7 +102,11 @@ func formatIncident(incident model.Incident, codes []string) string {
 func clip(value string, limit int) string {
 	value = strings.NewReplacer("\n", " ", "\r", " ", "<", "", ">", "", "&", "").Replace(value)
 	if len(value) > limit {
-		return value[:limit]
+		value = value[:limit]
+		for !utf8.ValidString(value) {
+			value = value[:len(value)-1]
+		}
+		return value + "… [truncated]"
 	}
 	return value
 }

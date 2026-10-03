@@ -39,11 +39,16 @@ type Source interface {
 }
 
 type State struct {
-	Enabled bool   `json:"enabled"`
-	Listen  string `json:"listen,omitempty"`
-	Clients int64  `json:"clients"`
-	Status  string `json:"status"`
+	Enabled          bool   `json:"enabled"`
+	Listen           string `json:"listen,omitempty"`
+	Clients          int64  `json:"clients"`
+	ActiveRequests   int64  `json:"active_requests"`
+	RejectedRequests uint64 `json:"rejected_requests"`
+	Status           string `json:"status"`
 }
+
+const maxConcurrentRequests = 32
+const maxJSONResponseBytes = 1 << 20
 
 type Server struct {
 	config      config.WebConfig
@@ -56,6 +61,9 @@ type Server struct {
 	password    string
 	hub         *eventHub
 	clients     atomic.Int64
+	requests    chan struct{}
+	active      atomic.Int64
+	rejected    atomic.Uint64
 	deniedIP    atomic.Uint64
 	deniedAuth  atomic.Uint64
 	deniedProxy atomic.Uint64
@@ -64,7 +72,7 @@ type Server struct {
 }
 
 func New(cfg config.WebConfig, source Source, store *storage.Store, logger *log.Logger) (*Server, error) {
-	s := &Server{config: cfg, source: source, store: store, logger: logger}
+	s := &Server{config: cfg, source: source, store: store, logger: logger, requests: make(chan struct{}, maxConcurrentRequests)}
 	var err error
 	if s.allowed, err = parseRanges(cfg.AllowedIPs); err != nil {
 		return nil, fmt.Errorf("web.allowed_ips: %w", err)
@@ -82,7 +90,7 @@ func New(cfg config.WebConfig, source Source, store *storage.Store, logger *log.
 		}
 	}
 	address := net.JoinHostPort(cfg.Listen, strconv.Itoa(cfg.Port))
-	s.server = &http.Server{Addr: address, Handler: s.Handler(), ReadHeaderTimeout: 5 * time.Second, IdleTimeout: 30 * time.Second, MaxHeaderBytes: 16 << 10}
+	s.server = &http.Server{Addr: address, Handler: s.Handler(), ReadHeaderTimeout: 5 * time.Second, ReadTimeout: 10 * time.Second, IdleTimeout: 30 * time.Second, MaxHeaderBytes: 16 << 10}
 	s.hub = newEventHub()
 	s.setState("stopped")
 	return s, nil
@@ -93,7 +101,10 @@ func (s *Server) State() State {
 	if value == nil {
 		return State{}
 	}
-	return *value
+	state := *value
+	state.ActiveRequests = s.active.Load()
+	state.RejectedRequests = s.rejected.Load()
+	return state
 }
 
 func (s *Server) setState(status string) {
@@ -147,6 +158,7 @@ func (s *Server) Handler() http.Handler {
 		w.Header().Set("Referrer-Policy", "no-referrer")
 		w.Header().Set("Cache-Control", "no-store")
 		w.Header().Set("Content-Security-Policy", "default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data:; connect-src 'self'; object-src 'none'; base-uri 'none'; frame-ancestors 'none'")
+		_ = http.NewResponseController(w).SetWriteDeadline(time.Now().Add(10 * time.Second))
 		peer, effective, reason := s.clientIP(r)
 		if reason != "" {
 			s.deny(w, r, peer, reason)
@@ -172,6 +184,21 @@ func (s *Server) Handler() http.Handler {
 			w.Header().Set("Allow", "GET, HEAD")
 			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 			return
+		}
+		if r.ContentLength > 0 || len(r.TransferEncoding) > 0 {
+			http.Error(w, "request body not allowed", http.StatusRequestEntityTooLarge)
+			return
+		}
+		if r.URL.Path != "/api/v1/stream" {
+			select {
+			case s.requests <- struct{}{}:
+				s.active.Add(1)
+				defer func() { s.active.Add(-1); <-s.requests }()
+			default:
+				s.rejected.Add(1)
+				http.Error(w, "dashboard busy", http.StatusServiceUnavailable)
+				return
+			}
 		}
 		mux.ServeHTTP(w, r)
 	})
@@ -266,8 +293,17 @@ func contains(prefixes []netip.Prefix, address netip.Addr) bool {
 }
 
 func jsonResponse(w http.ResponseWriter, value any) {
+	payload, err := json.Marshal(value)
+	if err != nil {
+		http.Error(w, "response unavailable", http.StatusInternalServerError)
+		return
+	}
+	if len(payload)+1 > maxJSONResponseBytes {
+		http.Error(w, "response too large", http.StatusServiceUnavailable)
+		return
+	}
 	w.Header().Set("Content-Type", "application/json; charset=utf-8")
-	_ = json.NewEncoder(w).Encode(value)
+	_, _ = w.Write(append(payload, '\n'))
 }
 
 func (s *Server) status(w http.ResponseWriter, r *http.Request) {

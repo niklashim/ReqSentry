@@ -1,3 +1,5 @@
+// Package daemon connects log ingestion, bounded analysis, persistence, and
+// optional read-only integrations for the live service.
 package daemon
 
 import (
@@ -15,9 +17,11 @@ import (
 	"github.com/niklashim/ReqSentry/internal/aggregator"
 	"github.com/niklashim/ReqSentry/internal/clientidentity"
 	"github.com/niklashim/ReqSentry/internal/config"
+	"github.com/niklashim/ReqSentry/internal/correlation"
 	"github.com/niklashim/ReqSentry/internal/detector"
 	"github.com/niklashim/ReqSentry/internal/enrichment"
 	"github.com/niklashim/ReqSentry/internal/model"
+	"github.com/niklashim/ReqSentry/internal/output"
 	"github.com/niklashim/ReqSentry/internal/phpfpm"
 	"github.com/niklashim/ReqSentry/internal/scoring"
 	"github.com/niklashim/ReqSentry/internal/serverhealth"
@@ -26,24 +30,31 @@ import (
 )
 
 type Daemon struct {
-	config                 config.Config
-	logger                 *log.Logger
-	health                 atomic.Pointer[serverhealth.Snapshot]
-	trigger                *serverhealth.Trigger
-	phpfpm                 *phpfpm.Collector
-	incidentMu             sync.RWMutex
-	incidents              []model.Incident
-	incidentSink           model.IncidentSink
-	incidentOutputFailures atomic.Uint64
-	checkpointStore        *storage.Store
-	enricher               *enrichment.Manager
-	operational            interface {
+	recoveryActive           bool
+	lastAnalysis             time.Time
+	analysisMu               sync.Mutex
+	watched                  atomic.Pointer[watcher.Manager]
+	errors                   *correlation.Engine
+	config                   config.Config
+	logger                   *log.Logger
+	health                   atomic.Pointer[serverhealth.Snapshot]
+	trigger                  *serverhealth.Trigger
+	phpfpm                   *phpfpm.Collector
+	incidentMu               sync.RWMutex
+	incidents                []model.Incident
+	incidentSink             model.IncidentSink
+	incidentOutputFailures   atomic.Uint64
+	errorPersistenceFailures atomic.Uint64
+	checkpointStore          *storage.Store
+	enricher                 *enrichment.Manager
+	operational              interface {
 		Operational(string, string, uint64) error
 	}
-	maxMindStatus string
-	slackStatus   string
-	webStatus     atomic.Pointer[WebStatus]
-	rollup        atomic.Pointer[aggregator.Aggregator]
+	notificationStatus func() []output.DeliveryStatus
+	maxMindStatus      string
+	slackStatus        string
+	webStatus          atomic.Pointer[WebStatus]
+	rollup             atomic.Pointer[aggregator.Aggregator]
 }
 
 type WebStatus struct {
@@ -54,20 +65,23 @@ type WebStatus struct {
 }
 
 type Status struct {
-	UpdatedAt     time.Time             `json:"updated_at"`
-	Running       bool                  `json:"running"`
-	TriggerActive bool                  `json:"trigger_active"`
-	Health        serverhealth.Snapshot `json:"health"`
-	WatchedLogs   []watcher.Status      `json:"watched_logs"`
-	Aggregation   aggregator.Metrics    `json:"aggregation"`
-	SQLite        string                `json:"sqlite"`
-	MaxMind       string                `json:"maxmind"`
-	Slack         string                `json:"slack"`
-	Web           WebStatus             `json:"web"`
+	Recovery      RecoveryStatus          `json:"recovery"`
+	Storage       storage.RetentionStatus `json:"storage"`
+	Notifications []output.DeliveryStatus `json:"notifications,omitempty"`
+	UpdatedAt     time.Time               `json:"updated_at"`
+	Running       bool                    `json:"running"`
+	TriggerActive bool                    `json:"trigger_active"`
+	Health        serverhealth.Snapshot   `json:"health"`
+	WatchedLogs   []watcher.Status        `json:"watched_logs"`
+	Aggregation   aggregator.Metrics      `json:"aggregation"`
+	SQLite        string                  `json:"sqlite"`
+	MaxMind       string                  `json:"maxmind"`
+	Slack         string                  `json:"slack"`
+	Web           WebStatus               `json:"web"`
 }
 
 func New(cfg config.Config, logger *log.Logger) *Daemon {
-	d := &Daemon{config: cfg, logger: logger, trigger: serverhealth.NewTrigger(cfg.Trigger)}
+	d := &Daemon{errors: correlation.New(cfg.Correlation, len(cfg.ErrorFiles) > 0), config: cfg, logger: logger, trigger: serverhealth.NewTrigger(cfg.Trigger)}
 	if cfg.PHPFPM.Enabled {
 		d.phpfpm = phpfpm.New(cfg.PHPFPM)
 	}
@@ -214,21 +228,65 @@ func (d *Daemon) Run(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
-	rollup := aggregator.New(d.config.Aggregation)
+	rollup := aggregator.New(d.config.Aggregation, d.config.Analysis.Window.Duration)
 	d.rollup.Store(rollup)
+	recoveryStatus := RecoveryStatus{Enabled: d.config.Recovery.Enabled, State: "disabled"}
+	var resume map[string]storage.Offset
+	if d.config.Recovery.Enabled && d.checkpointStore != nil {
+		recoveryCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
+		var recoveryErr error
+		resume, recoveryStatus, recoveryErr = d.recover(recoveryCtx, rollup)
+		cancel()
+		if recoveryErr != nil {
+			rollup = aggregator.New(d.config.Aggregation, d.config.Analysis.Window.Duration)
+			d.rollup.Store(rollup)
+			d.errors.Reset()
+			recoveryStatus.State = "deferred"
+			recoveryStatus.Detail = recoveryErr.Error()
+			d.logger.Printf("crash recovery deferred: %s", recoveryStatus.Detail)
+		} else {
+			d.recoveryActive = true
+		}
+	}
+	if d.config.Recovery.Enabled && d.checkpointStore == nil {
+		recoveryStatus.State = "unavailable"
+		recoveryStatus.Detail = "SQLite unavailable"
+	}
+
 	historyDone := make(chan struct{})
 	if d.checkpointStore != nil && d.config.Web.Enabled {
 		go func() { defer close(historyDone); d.monitorDashboardHistory(ctx, rollup) }()
 	} else {
 		close(historyDone)
 	}
-	manager := watcher.New(d.config.AccessFiles, d.logger, func(event model.RequestEvent) {
+	allSources := append(append([]config.AccessFile(nil), d.config.AccessFiles...), d.config.ErrorFiles...)
+	manager := watcher.New(allSources, d.logger, func(event model.RequestEvent) {
 		parsed.Add(1)
 		resolved, excluded := resolver.Resolve(event)
 		if excluded {
 			allowlisted.Add(1)
 		}
-		rollup.Observe(resolved, excluded, time.Now())
+		at := time.Now()
+		if d.recoveryActive {
+			at = resolved.Timestamp
+		}
+		rollup.Observe(resolved, excluded, at)
+		d.errors.Observe(resolved)
+	})
+	manager.SetResumeOffsets(resume)
+	d.watched.Store(manager)
+	manager.SetProfiles(d.config.LogProfiles)
+	manager.SetErrorSink(func(event model.ErrorEvent) {
+		d.errors.ObserveError(event)
+		if d.checkpointStore != nil {
+			if err := d.checkpointStore.WriteError(event); err != nil {
+				count := d.errorPersistenceFailures.Add(1)
+				d.errors.MarkDropped()
+				if count&(count-1) == 0 {
+					d.logger.Printf("error evidence dropped count=%d", count)
+				}
+			}
+		}
 	})
 	watchDone := make(chan struct{})
 	go func() {
@@ -255,11 +313,23 @@ func (d *Daemon) Run(ctx context.Context) error {
 	if d.checkpointStore != nil {
 		manager.SetCheckpointStore(d.checkpointStore)
 	}
+	checkpointDone := make(chan struct{})
+	if d.recoveryActive {
+		lookback := 2 * d.config.Analysis.Window.Duration
+		manager.ConfigureRecovery(lookback, d.config.Recovery.MaxBytes)
+		go func() {
+			defer close(checkpointDone)
+			manager.PeriodicCheckpoints(ctx, d.config.Recovery.Interval.Duration, lookback, d.config.Recovery.MaxBytes)
+		}()
+	} else {
+		close(checkpointDone)
+	}
 	statusDone := make(chan struct{})
 	go func() {
 		defer close(statusDone)
 		ticker := time.NewTicker(10 * time.Second)
 		defer ticker.Stop()
+		lowDiskCount := uint64(0)
 		write := func(running bool) {
 			if d.checkpointStore == nil {
 				return
@@ -276,9 +346,24 @@ func (d *Daemon) Run(ctx context.Context) error {
 			if slackStatus == "" {
 				slackStatus = "disabled"
 			}
-			status := Status{UpdatedAt: time.Now().UTC(), Running: running, TriggerActive: d.trigger.Active(), Health: health, WatchedLogs: manager.Status(), Aggregation: rollup.Metrics(), SQLite: "available", MaxMind: maxmindStatus, Slack: slackStatus}
+			status := Status{Recovery: recoveryStatus, UpdatedAt: time.Now().UTC(), Running: running, TriggerActive: d.trigger.Active(), Health: health, WatchedLogs: manager.Status(), Aggregation: rollup.Metrics(), SQLite: "available", MaxMind: maxmindStatus, Slack: slackStatus}
+			if d.notificationStatus != nil {
+				status.Notifications = d.notificationStatus()
+			}
 			if web := d.webStatus.Load(); web != nil {
 				status.Web = *web
+			}
+			diskCtx, diskCancel := context.WithTimeout(context.Background(), time.Second)
+			status.Storage = d.checkpointStore.DiskStatus(diskCtx, d.config.Database.Retention.MinimumFreeBytes)
+			diskCancel()
+			if status.Storage.LowDisk {
+				lowDiskCount++
+				if lowDiskCount&(lowDiskCount-1) == 0 {
+					d.logger.Printf("storage low disk free_bytes=%d", status.Storage.FreeBytes)
+				}
+				d.alert("storage_low_disk", "configured disk threshold reached", lowDiskCount)
+			} else {
+				lowDiskCount = 0
 			}
 			payload, _ := json.Marshal(status)
 			writeCtx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
@@ -309,6 +394,7 @@ func (d *Daemon) Run(ctx context.Context) error {
 				return
 			case now := <-ticker.C:
 				rollup.Prune(now)
+				d.errors.Prune(now)
 				var memory runtime.MemStats
 				runtime.ReadMemStats(&memory)
 				degraded := rollup.Metrics().Degraded
@@ -369,6 +455,7 @@ func (d *Daemon) Run(ctx context.Context) error {
 	<-watchDone
 	<-statusDone
 	<-historyDone
+	<-checkpointDone
 	metrics := rollup.Metrics()
 	d.logger.Printf("ReqSentry stopped parsed_requests=%d allowlisted_requests=%d active_records=%d dropped_events=%d", parsed.Load(), allowlisted.Load(), metrics.ActiveRecords, metrics.DroppedEvents)
 	return nil
@@ -465,6 +552,16 @@ func (d *Daemon) monitorAnalysis(ctx context.Context, rollup *aggregator.Aggrega
 }
 
 func (d *Daemon) analyzeOnce(rollup *aggregator.Aggregator, scorer *scoring.Engine, now time.Time) {
+	d.analysisMu.Lock()
+	defer d.analysisMu.Unlock()
+	if d.recoveryActive {
+		now = now.Truncate(d.config.Analysis.Window.Duration).Add(-time.Nanosecond)
+		if !now.After(d.lastAnalysis) {
+			return
+		}
+		d.lastAnalysis = now
+	}
+
 	window := d.config.Analysis.Window.Duration
 	if window <= 0 {
 		window = 30 * time.Second
@@ -510,6 +607,12 @@ func (d *Daemon) analyzeOnce(rollup *aggregator.Aggregator, scorer *scoring.Engi
 			Server: d.config.Server.Name, Snapshot: snapshot, Signals: signals,
 			AllRequests: allRequests, Health: health, PHPFPM: pools,
 		})
+		incident.Errors = d.errors.Context(incident)
+		for _, source := range d.ErrorSources() {
+			if !source.Open || source.LastError != "" {
+				incident.Errors.UnavailableSources = append(incident.Errors.UnavailableSources, source.Path)
+			}
+		}
 		incident.EnrichmentStatus = status
 		incident.ASN = enrichmentResult.ASN
 		incident.ASNOrganization = enrichmentResult.ASNOrganization
@@ -541,4 +644,22 @@ func (d *Daemon) analyzeOnce(rollup *aggregator.Aggregator, scorer *scoring.Engi
 		d.logger.Printf("incident site=%s ip=%s score=%d decision=%s ruleset=%d reasons=%s MONITOR MODE - NO ACTION TAKEN",
 			incident.SiteID, incident.ClientIP, incident.Score, incident.Decision, incident.RulesetVersion, strings.Join(codes, ","))
 	}
+}
+
+func (d *Daemon) SetNotificationStatus(f func() []output.DeliveryStatus) { d.notificationStatus = f }
+
+func (d *Daemon) RecentErrors(site string, from, to time.Time, limit int) []model.ErrorEvent {
+	return d.errors.Recent(site, from, to, limit)
+}
+
+func (d *Daemon) ErrorSources() []watcher.Status {
+	out := []watcher.Status{}
+	if m := d.watched.Load(); m != nil {
+		for _, s := range m.Status() {
+			if s.Kind == "error" {
+				out = append(out, s)
+			}
+		}
+	}
+	return out
 }
