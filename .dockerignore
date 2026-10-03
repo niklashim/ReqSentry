@@ -30,5 +30,6 @@ dev-data
 Tickets
 docs
 tests/k6
+tests/dashboard
 logo.png
 **/*_test.go

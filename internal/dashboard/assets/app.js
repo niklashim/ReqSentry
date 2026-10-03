@@ -28,6 +28,70 @@ let incidentFilter = {
 let overviewCache = null;
 let overviewCachedAt = 0;
 let renderGeneration = 0;
+let overviewView = null;
+let overviewPending = 0;
+let overviewRetryAt = 0;
+
+function overviewValues(v, h = {}, pools = [], summary = {}, name, analysisActive) {
+  const active = pools.reduce((sum, p) => sum + Number(p.Stats?.["active processes"] || 0), 0);
+  const idle = pools.reduce((sum, p) => sum + Number(p.Stats?.["idle processes"] || 0), 0);
+  return {
+    metrics: [
+      ["Requests / second", fmt(v.requests_per_second), "last complete second"],
+      ["Requests / minute", fmt(v.requests), "rolling 60 seconds"],
+      ["Active IPs", fmt(v.active_ips), "tracked clients"],
+      ["HTTP 404", pct(v.statuses?.[404] || 0, v.requests), fmt(v.statuses?.[404] || 0) + " responses", "warn"],
+      ["CPU", h.CPUPercent == null ? "—" : h.CPUPercent.toFixed(1) + "%", "latest sample"],
+      ["Memory", h.MemoryUsedPercent == null ? "—" : h.MemoryUsedPercent.toFixed(1) + "%", "latest sample"],
+      ["PHP-FPM", pools.length ? `${active} / ${active + idle}` : "—", "active / total workers"],
+      ["Would block", fmt(summary.would_block_ips), "unique IPs · monitor only", "alert"],
+      ["Suspicious IPs", fmt(summary.suspicious_ips), "last five minutes"],
+      ["Active incidents", fmt(summary.active_incidents), "last five minutes"],
+      ["HTTP 2xx", pct(v.status_families?.[2] || 0, v.requests), fmt(v.status_families?.[2] || 0) + " responses"],
+      ["HTTP 301 / 302", `${fmt(v.statuses?.[301] || 0)} / ${fmt(v.statuses?.[302] || 0)}`, "redirect responses"],
+      ["HTTP 5xx", pct(v.status_families?.[5] || 0, v.requests), fmt(v.status_families?.[5] || 0) + " responses", "warn"],
+    ],
+    state: [
+      ["Server", name || "—"],
+      ["Mode", "MONITOR"],
+      ["Analysis", analysisActive ? "Active" : "Idle"],
+      ["Load · 1 / 5 / 15", [h.Load1, h.Load5, h.Load15].map(x => x == null ? "—" : Number(x).toFixed(2)).join(" / ")],
+      ["PHP-FPM pools", pools.length],
+      ["Dropped window events", fmt(v.window_dropped)],
+      ["Aggregator degraded", v.degraded ? "Yes" : "No"],
+    ],
+  };
+}
+
+function overviewVisible() {
+  return current() === "overview" && overviewView && root.contains(overviewView.cards);
+}
+
+function updateOverviewLive() {
+  if (!lastLive || !overviewVisible()) return;
+  const values = overviewValues(lastLive.live, lastLive.health || {}, lastLive.php_fpm || [],
+    lastLive.recent_incident_summary || {}, lastLive.server, lastLive.analysis_active);
+  // Preserve the charts, controls, focus, and scroll positions between snapshots.
+  const setText = (element, text) => {
+    if (element.textContent !== String(text)) element.textContent = String(text);
+  };
+  values.metrics.forEach(([, value, sub], index) => {
+    const card = overviewView.cards.children[index];
+    setText(card.querySelector(".value"), value);
+    setText(card.querySelector(".sub"), sub);
+  });
+  values.state.forEach(([, value], index) => setText(overviewView.state[index].lastElementChild, value));
+}
+
+function refreshOverviewLive() {
+  updateOverviewLive();
+  // Coalesce snapshots while a refresh is pending. Keep editing controls stable;
+  // their change handlers request an explicit refresh with the selected filters.
+  const editing = root.contains(document.activeElement) &&
+    document.activeElement.matches("input, select, button");
+  if (!overviewPending && !editing && Date.now() >= overviewRetryAt &&
+      (!overviewVisible() || Date.now() - overviewCachedAt > 30000)) render({background: true});
+}
 
 function node(tag, text, className) {
   const n = document.createElement(tag);
@@ -267,9 +331,9 @@ function recentPanel(items) {
   return p;
 }
 
-async function overview(generation) {
+async function overview(generation, background) {
   setTitle("Overview");
-  clear(root);
+  const next = node("div");
   if (
     !overviewCache ||
     overviewCache.range !== range ||
@@ -310,79 +374,10 @@ async function overview(generation) {
     (stats.history?.[0]?.bucket_minutes || 1) === 1
       ? "minute"
       : `${stats.history[0].bucket_minutes}-minute bucket`;
-  const active = pools.reduce(
-      (sum, p) => sum + Number(p.Stats?.["active processes"] || 0),
-      0,
-    ),
-    idle = pools.reduce(
-      (sum, p) => sum + Number(p.Stats?.["idle processes"] || 0),
-      0,
-    );
+  const values = overviewValues(v, h, pools, summary, server.name, server.analysis_active);
   const cards = node("div", null, "grid metrics");
-  append(
-    cards,
-    metric(
-      "Requests / second",
-      fmt(v.requests_per_second),
-      "last complete second",
-    ),
-    metric("Requests / minute", fmt(v.requests), "rolling 60 seconds"),
-    metric("Active IPs", fmt(v.active_ips), "tracked clients"),
-    metric(
-      "HTTP 404",
-      pct(v.statuses?.[404] || 0, v.requests),
-      fmt(v.statuses?.[404] || 0) + " responses",
-      "warn",
-    ),
-    metric(
-      "CPU",
-      h.CPUPercent === null || h.CPUPercent === undefined
-        ? "—"
-        : h.CPUPercent.toFixed(1) + "%",
-      "latest sample",
-    ),
-    metric(
-      "Memory",
-      h.MemoryUsedPercent === null || h.MemoryUsedPercent === undefined
-        ? "—"
-        : h.MemoryUsedPercent.toFixed(1) + "%",
-      "latest sample",
-    ),
-    metric(
-      "PHP-FPM",
-      pools.length ? `${active} / ${active + idle}` : "—",
-      "active / total workers",
-    ),
-    metric(
-      "Would block",
-      fmt(summary.would_block_ips),
-      "unique IPs · monitor only",
-      "alert",
-    ),
-    metric("Suspicious IPs", fmt(summary.suspicious_ips), "last five minutes"),
-    metric(
-      "Active incidents",
-      fmt(summary.active_incidents),
-      "last five minutes",
-    ),
-    metric(
-      "HTTP 2xx",
-      pct(v.status_families?.[2] || 0, v.requests),
-      fmt(v.status_families?.[2] || 0) + " responses",
-    ),
-    metric(
-      "HTTP 301 / 302",
-      `${fmt(v.statuses?.[301] || 0)} / ${fmt(v.statuses?.[302] || 0)}`,
-      "redirect responses",
-    ),
-    metric(
-      "HTTP 5xx",
-      pct(v.status_families?.[5] || 0, v.requests),
-      fmt(v.status_families?.[5] || 0) + " responses",
-      "warn",
-    ),
-  );
-  root.append(cards);
+  append(cards, ...values.metrics.map(value => metric(...value)));
+  next.append(cards);
   const split = node("div", null, "split");
   const graph = panel("Traffic and server load");
   if (stats.history?.length) {
@@ -401,25 +396,9 @@ async function overview(generation) {
   } else
     graph.append(empty("History appears after the first complete minute."));
   const status = panel("System state");
-  append(
-    status,
-    kv("Server", server.name || "—"),
-    kv("Mode", "MONITOR"),
-    kv("Analysis", server.analysis_active ? "Active" : "Idle"),
-    kv(
-      "Load · 1 / 5 / 15",
-      [h.Load1, h.Load5, h.Load15]
-        .map((x) =>
-          x === undefined || x === null ? "—" : Number(x).toFixed(2),
-        )
-        .join(" / "),
-    ),
-    kv("PHP-FPM pools", pools.length),
-    kv("Dropped window events", fmt(v.window_dropped)),
-    kv("Aggregator degraded", v.degraded ? "Yes" : "No"),
-  );
+  append(status, ...values.state.map(value => kv(...value)));
   append(split, graph, status);
-  root.append(split);
+  next.append(split);
   if (stats.history?.length) {
     const impact = panel("Error and resource trends");
     impact.append(
@@ -432,7 +411,7 @@ async function overview(generation) {
         "Each series uses its own peak; missing health samples appear as gaps.",
       ),
     );
-    root.append(impact);
+    next.append(impact);
     const incidentsChart = panel("Traffic and incidents");
     incidentsChart.append(
       chart(
@@ -444,14 +423,21 @@ async function overview(generation) {
         "Incident gaps mean the SQLite count was unavailable when the bucket was saved.",
       ),
     );
-    root.append(incidentsChart);
+    next.append(incidentsChart);
   }
-  root.append(
+  next.append(
     recentPanel(incidents.incidents),
     errorsPanel,
     note(stats.coverage),
     note(summary.coverage || ""),
   );
+  // An input may have gained focus while the background requests were pending.
+  if (background && overviewVisible() && root.contains(document.activeElement) &&
+      document.activeElement.matches("input, select, button")) return;
+  // Commit a complete view in one synchronous update, never an empty page.
+  root.replaceChildren(...next.childNodes);
+  overviewView = {cards, state: [...status.querySelectorAll(".kv")]};
+  overviewRetryAt = 0;
 }
 
 async function sites() {
@@ -1479,13 +1465,14 @@ async function incidentDetail(id) {
   );
 }
 
-async function render() {
+async function render({background = false} = {}) {
   const generation = ++renderGeneration,
     route = current(),
     parts = route.split("/"),
     page = parts[0];
+  if (page === "overview") overviewPending++;
   try {
-    if (page === "overview") await overview(generation);
+    if (page === "overview") await overview(generation, background);
     else if (page === "sites") await sites();
     else if (page === "site")
       await siteDetail(decodeURIComponent(parts.slice(1).join("/")));
@@ -1501,8 +1488,16 @@ async function render() {
     else if (page === "incident") await incidentDetail(parts[1]);
     else error("Unknown dashboard section");
   } catch (e) {
-    if (generation === renderGeneration)
-      error(e.message || "Dashboard data unavailable");
+    if (generation === renderGeneration) {
+      if (page === "overview" && overviewVisible()) {
+        overviewRetryAt = Date.now() + 30000;
+        if (!root.querySelector(".overview-error")) root.prepend(node("div",
+          "History refresh unavailable. Showing previous details; live counters continue when connected.",
+          "error overview-error"));
+      } else error(e.message || "Dashboard data unavailable");
+    }
+  } finally {
+    if (page === "overview") overviewPending--;
   }
 }
 
@@ -1516,7 +1511,7 @@ function startStream() {
         connection.textContent =
           "Live · " + new Date(lastLive.at).toLocaleTimeString();
         connection.className = "connection live";
-        if (current() === "overview") render();
+        if (current() === "overview") refreshOverviewLive();
       } catch {}
     });
     events.onerror = () => {
@@ -1531,6 +1526,7 @@ function startStream() {
 window.addEventListener("hashchange", render);
 document.getElementById("refresh").addEventListener("click", () => {
   overviewCachedAt = 0;
+  overviewRetryAt = 0;
   render();
 });
 render();

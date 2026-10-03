@@ -1,4 +1,5 @@
-# Development-only config copied into the combined Nginx + ReqSentry image.
+# Development-only config for the combined Nginx + ReqSentry image.
+# For installation and every supported setting, use configs/example.yaml.
 server:
   name: reqsentry-local
 mode: monitor

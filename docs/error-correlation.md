@@ -1,6 +1,6 @@
 # Error evidence and correlation
 
-Optional `error_files` collect web-server/application failures alongside access traffic. They produce separate error events and never increment HTTP request counters or change detection scores. The local Compose configuration follows all four existing Nginx error files. See [the feature configuration example](../configs/enhancements.example.yaml).
+Optional `error_files` collect web-server/application failures alongside access traffic. They produce separate error events and never increment HTTP request counters or change detection scores. The local Compose configuration follows all four existing Nginx error files. See the commented `error_files`, `log_profiles`, and `correlation` sections in the [complete configuration example](../configs/example.yaml).
 
 Supported text formats are `nginx-error` and the bracketed Apache 2.4 error layout. `type: nginx|apache` selects the corresponding error format by default. Set `timezone` to the producer's IANA zone when text timestamps lack offsets; the default is UTC. Optional `minimum_severity` defaults to `warning`. JSON/logfmt error sources use the same [mapping profiles](structured-logs.md), with required timestamp, severity, and message plus optional error type/code, path, client/peer address, and request/trace IDs. The ECS preset supports a documented error-field subset. Arbitrary Apache custom layouts and multiline plaintext PHP-FPM stack assembly are outside this parser contract.
 

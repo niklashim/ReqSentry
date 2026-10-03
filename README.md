@@ -117,6 +117,8 @@ The standard Compose fixture uses the actual k6 source IP. The synthetic walkthr
 
 Start with the [installation guide](docs/install.md) and [complete commented configuration reference](configs/example.yaml). Required settings stay active; optional features can be enabled by uncommenting their settings and parent blocks.
 
+`configs/example.yaml` is the single user-facing configuration example. The Docker development setup uses its own [fixture configuration](docker/webserver/reqsentry.yaml). ReqSentry loads one file selected by `-config`; these files are not combined.
+
 ```sh
 go build -o reqsentry ./cmd/reqsentry
 ./reqsentry -config /etc/reqsentry/config.yaml config test

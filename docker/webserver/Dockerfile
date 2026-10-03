@@ -13,7 +13,7 @@ COPY docker/webserver/nginx/nginx.conf /etc/nginx/nginx.conf
 COPY docker/webserver/nginx/conf.d/ /etc/nginx/conf.d/
 COPY docker/webserver/html/ /usr/share/nginx/html/
 COPY docker/webserver/supervise.py /usr/local/bin/reqsentry-supervise.py
-COPY configs/config.local.example.yaml /etc/reqsentry/config.yaml
+COPY docker/webserver/reqsentry.yaml /etc/reqsentry/config.yaml
 RUN mkdir -p /var/log/reqsentry /var/lib/reqsentry/maxmind /var/log/nginx \
     && nginx -t \
     && /usr/local/bin/reqsentry -config /etc/reqsentry/config.yaml config test

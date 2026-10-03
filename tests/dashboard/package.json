@@ -1,0 +1,14 @@
+{
+  "name": "reqsentry-dashboard-tests",
+  "private": true,
+  "license": "MIT",
+  "scripts": {
+    "test": "node --test dashboard.test.cjs"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "devDependencies": {
+    "linkedom": "0.18.12"
+  }
+}

@@ -25,7 +25,7 @@ The final live evidence check at 17:30 UTC recorded 60 clients, four sites, 156 
 ## Implementation checks
 
 - A fresh `go test -race -count=1 ./...` passes across all 20 Go packages. After correcting the dashboard evidence links, the focused dashboard/config race tests pass again.
-- `go vet ./...`, dashboard and k6 configuration JavaScript syntax checks, Python fixture syntax validation, all three example configuration checks, and a Linux arm64 build pass.
+- `go vet ./...`, dashboard and k6 configuration JavaScript syntax checks, Python fixture syntax validation, the configuration examples available during the review, and a Linux arm64 build pass.
 - The documented native demo command was exercised through its build, watcher readiness, 30-second run, and clean shutdown.
 - Renamed example-site Nginx configuration passes its syntax check in a separate container. The existing development stack was left running.
 - The four PNG screenshots and looping GIF were visually inspected. The GIF is approximately 3.7 MB and includes live metrics, site/IP/network investigation, incident evidence, error context, request search, and health views.

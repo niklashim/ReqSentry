@@ -1,6 +1,6 @@
 # Notifications
 
-ReqSentry can route incidents and recurring operational alerts to named Slack, Microsoft Teams, and Amazon SNS destinations. Remote delivery is optional and independent of SQLite/JSONL output. See [the optional configuration example](../configs/enhancements.example.yaml).
+ReqSentry can route incidents and recurring operational alerts to named Slack, Microsoft Teams, and Amazon SNS destinations. Remote delivery is optional and independent of SQLite/JSONL output. The `output` section of the [complete configuration example](../configs/example.yaml) includes commented Slack, Teams, and SNS settings.
 
 Each `output.destinations` entry has a unique `name`, `type`, and `enabled` flag. Incident routing supports `minimum_score` (0–100), `decisions`, and `sites`. Omit a filter to include all values; an empty string in `sites` explicitly includes server-wide incidents. Operational alerts use a separate `operational: true` subscription and are sent after at least three consecutive failures. Site/score filters apply to incident alerts, not operational alerts.
 

@@ -29,6 +29,16 @@ go run ./cmd/reqsentry -config configs/example.yaml config test
 
 Run `go run ./cmd/reqsentry -config /absolute/path/config.yaml` to start the monitor; the sample config's `/var/...` paths need adaptation to the host. The example defaults to continuous analysis (`trigger.mode: always`); its optional settings are commented out and can be enabled individually. `status`, `report`, `maxmind status`, and `maxmind update` are local operator commands after `-config PATH`. Use `replay LOG...` for historical combined-format logs; it emits incident JSON lines and a summary without network integrations. The service is not yet validated for production deployment because [ticket 021](../Tickets/021-replay-validation.md) still requires representative log review and sustained measurements on the target Linux server.
 
+Optional frontend regression tests require Node.js 20+ and npm. They exercise the actual dashboard script with an in-memory DOM and controlled API/stream responses; no browser, daemon, or external notification is started:
+
+```sh
+cd tests/dashboard
+npm ci
+npm test
+```
+
+Node.js and these development-only dependencies are not required to build or run ReqSentry. The tests cover live-update stability, delayed and failed refreshes, filter drafts, navigation races, and request coalescing. Browser checks complement them for focus, scrolling, and layout.
+
 ## Local Docker development
 
 The primary development environment runs **Nginx and ReqSentry in the same Linux container**. A separate persistent k6 container generates traffic against Nginx; ReqSentry reads four real local access logs. This mirrors the initial same-server Linux deployment model. The container process supervisor is for development only. [Local environment tickets 042–052 and 054](../Tickets/README.md) are complete and archived; the separate sidecar idea was closed as deferred. Docker and Docker Compose are required on the development host; k6 itself runs only in its container. There is no Makefile.
@@ -41,7 +51,7 @@ docker compose ps
 docker compose down
 ```
 
-Open [shop.example](http://localhost:8081), [api.example](http://localhost:8082), [docs.example](http://localhost:8083), [blog.example](http://localhost:8084), and the [ReqSentry dashboard](http://localhost:8090). These are local fixture URLs; no DNS setup is needed. All five published ports bind to host loopback. Compose keeps `reqsentry-k6` running so tests launch with `docker exec`. The checked-in [local example YAML](../configs/config.local.example.yaml) is copied into the image and uses `mode: monitor`, `trigger.mode: always`, all four Nginx access logs, disabled Slack/MaxMind, and a **development-only** Docker bridge allowlist for the dashboard. Production dashboard defaults remain disabled and deny by default.
+Open [shop.example](http://localhost:8081), [api.example](http://localhost:8082), [docs.example](http://localhost:8083), [blog.example](http://localhost:8084), and the [ReqSentry dashboard](http://localhost:8090). These are local fixture URLs; no DNS setup is needed. All five published ports bind to host loopback. Compose keeps `reqsentry-k6` running so tests launch with `docker exec`. The checked-in [Docker fixture configuration](../docker/webserver/reqsentry.yaml) is copied into the image and uses `mode: monitor`, `trigger.mode: always`, all four Nginx access logs, disabled Slack/MaxMind, and a **development-only** Docker bridge allowlist for the dashboard. Production dashboard defaults remain disabled and deny by default. The single user-facing configuration example is [configs/example.yaml](../configs/example.yaml); ReqSentry loads one selected file and does not merge these configurations.
 
 The IP explorer lists the site names each tracked IP reached during the rolling minute, with links to site details. An incident with no site ID is a server-wide decision and appears as **All sites**. Older saved incidents retain their original `site1` or `site2` IDs; the new example names apply to newly ingested traffic.
 
@@ -109,7 +119,7 @@ docker compose up -d --build
 
 ### Optional integrations
 
-No credentials are needed for the base environment. Copy `.env.example` to `.env` only if you enable an integration. For MaxMind, set `maxmind.enabled: true`, `maxmind.update.enabled: true`, `account_id`, and `license_key_env: REQSENTRY_MAXMIND_LICENSE_KEY` in `configs/config.local.example.yaml`, then set the key in `.env` and rebuild. MMDB files persist under `dev-data/reqsentry/maxmind/`. For Slack, set `output.slack.enabled: true` and `webhook_env: REQSENTRY_SLACK_WEBHOOK`, set the webhook in `.env`, and rebuild. Never commit `.env` or real credentials. The `.env.example` account ID entry is a reminder; the current YAML loader reads `account_id` from the config file.
+No credentials are needed for the base environment. Copy `.env.example` to `.env` only if you enable an integration. For MaxMind, set `maxmind.enabled: true`, `maxmind.update.enabled: true`, `account_id`, and `license_key_env: REQSENTRY_MAXMIND_LICENSE_KEY` in `docker/webserver/reqsentry.yaml`, then set the key in `.env` and rebuild. MMDB files persist under `dev-data/reqsentry/maxmind/`. For Slack, set `output.slack.enabled: true` and `webhook_env: REQSENTRY_SLACK_WEBHOOK`, set the webhook in `.env`, and rebuild. Never commit `.env` or real credentials. The `.env.example` account ID entry is a reminder; the current YAML loader reads `account_id` from the config file.
 
 ### Troubleshooting
 
@@ -130,4 +140,4 @@ The four-domain fixture was rebuilt and verified on 2026-10-01. All four site UR
 
 On 2026-10-02, the repeat eight-scenario k6 run passed 1,097 response checks across 1,105 requests and saved five more monitor-only incidents. A separate concurrent Nginx/dashboard stress run is recorded in [dashboard limits](dashboard.md). The [architecture guide](architecture.md) maps the code packages and describes the change workflow.
 
-The local fixture now follows all four Nginx error logs and records generated request IDs in combined access logs. The Nginx configuration also defines an optional `reqsentry_json` format; change a site’s producer directive and ReqSentry source format together, and start a fresh log file rather than mixing formats in an existing persistent file. See the [enhancement example](../configs/enhancements.example.yaml) and [structured/error guides](structured-logs.md).
+The local fixture now follows all four Nginx error logs and records generated request IDs in combined access logs. The Nginx configuration also defines an optional `reqsentry_json` format; change a site’s producer directive and ReqSentry source format together, and start a fresh log file rather than mixing formats in an existing persistent file. See the [complete configuration example](../configs/example.yaml), [structured log guide](structured-logs.md), and [error correlation guide](error-correlation.md).
