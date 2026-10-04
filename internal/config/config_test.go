@@ -79,6 +79,9 @@ func TestRejectsInvalidConfig(t *testing.T) {
 		{"invalid health interval", minimalConfig + "health:\n  interval: 100ms\n", "health.interval"},
 		{"remote PHP-FPM URL", minimalConfig + "php_fpm:\n  enabled: true\n  pools:\n    - name: www\n      status_url: http://example.com/status\n", "loopback host"},
 		{"unknown score weight", minimalConfig + "detection:\n  weights:\n    UNKNOWN: 50\n", "detection.weights.UNKNOWN"},
+		{"zero excluded ASN", minimalConfig + "detection:\n  excluded_asns: [0]\n", "detection.excluded_asns"},
+		{"duplicate excluded ASN", minimalConfig + "detection:\n  excluded_asns: [15169, 15169]\n", "detection.excluded_asns"},
+		{"invalid WordPress active ratio", minimalConfig + "detection:\n  thresholds:\n    wordpress_active_ratio: 1.1\n", "wordpress_active_ratio"},
 		{"invalid 404 ratio", minimalConfig + "detection:\n  thresholds:\n    high_404_ratio: 1.5\n", "high_404_ratio"},
 	}
 	for _, tt := range tests {
@@ -114,6 +117,31 @@ func TestSecretReferences(t *testing.T) {
 	got, err = ResolveSecret("", "webhook")
 	if err != nil || got != "from-file" {
 		t.Fatalf("credential reference: value=%q error=%v", got, err)
+	}
+}
+
+func TestASNExclusionDefaultsReplacementAndOptOut(t *testing.T) {
+	google, other := uint32(15169), uint32(14671)
+	for _, tc := range []struct {
+		name, extra   string
+		google, other bool
+	}{
+		{"default", "", true, false},
+		{"replace", "detection:\n  excluded_asns: [14671]\n", false, true},
+		{"opt out", "detection:\n  excluded_asns: []\n", false, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg, err := loadText(t, minimalConfig+tc.extra)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := cfg.Validate(); err != nil {
+				t.Fatal(err)
+			}
+			if cfg.Detection.ExcludesASN(&google) != tc.google || cfg.Detection.ExcludesASN(&other) != tc.other || cfg.Detection.ExcludesASN(nil) {
+				t.Fatalf("ASN policy changed or granted unknown metadata an exemption: %+v", cfg.Detection.ExcludedASNs)
+			}
+		})
 	}
 }
 

@@ -288,3 +288,35 @@ func TestLowVolumeExpensiveRequests(t *testing.T) {
 		t.Fatalf("expensive low-volume traffic missed: %+v", global)
 	}
 }
+
+func TestWordPressFloodRequiresSustainedEndpointTraffic(t *testing.T) {
+	at := time.Unix(1_800_000_000, 0)
+	base := aggregator.Snapshot{At: at, Window: 30 * time.Second, Requests: 600, PeakRPS: 20, ActiveSeconds: 30, WordPressRequests: 300, WordPressActiveSeconds: 24}
+	if !hasSignal(HTTP(base), "WORDPRESS_ENDPOINT_FLOOD") {
+		t.Fatal("sustained sitemap pressure missed")
+	}
+	for _, tc := range []struct {
+		name     string
+		requests uint64
+		active   int
+		window   time.Duration
+	}{
+		{"mainly static assets", 299, 30, 30 * time.Second},
+		{"one-second sitemap burst", 300, 1, 30 * time.Second},
+		{"insufficient active seconds", 300, 23, 30 * time.Second},
+		{"short window", 300, 1, time.Second},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			s := base
+			s.WordPressRequests, s.WordPressActiveSeconds, s.Window = tc.requests, tc.active, tc.window
+			if hasSignal(HTTP(s), "WORDPRESS_ENDPOINT_FLOOD") {
+				t.Fatal("unrelated total rate or a short burst supplied sustained endpoint evidence")
+			}
+		})
+	}
+	rules := config.DefaultDetectionConfig()
+	rules.Thresholds["wordpress_rps"] = 20
+	if hasSignal(HTTPWithRules(base, rules), "WORDPRESS_ENDPOINT_FLOOD") {
+		t.Fatal("WordPress threshold override ignored")
+	}
+}

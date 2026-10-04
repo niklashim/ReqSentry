@@ -53,7 +53,7 @@ DETECTED             CLIENT IP                               SITE               
   Evidence: HIGH_404_RATE, HIGH_404_DIVERSITY, PATH_ENUMERATION, HIGH_REQUEST_RATE, SUSTAINED_HIGH_RATE, METHOD_404_SCAN, AUTOMATED_USER_AGENT
 ```
 
-This is an incident decision, not a permanent IP reputation or live blocklist. A client can have different scores across sites and time windows. Missing country data stays unavailable; normal traffic does not produce a saved incident under the default rules.
+This is an incident decision, not a permanent IP reputation or live blocklist. A client can have different scores across sites and time windows. Missing country data stays unavailable; windows below the configured `WATCH` threshold do not produce a saved incident.
 
 ### Operations
 
@@ -118,7 +118,7 @@ reqsentry -config /etc/reqsentry/config.yaml -json replay /var/log/nginx/access.
 reqsentry -config /etc/reqsentry/config.yaml -limit 20 preview /var/log/app/access.jsonl
 ```
 
-Replay results go to the terminal; they do not change saved offsets or import into database/dashboard history. Without a default config, replay uses built-in monitor defaults and a filename-derived site. Configure formats/profiles before replaying structured sources. Historical host health is not reconstructed and MaxMind enrichment is disabled, so scores can differ from live monitoring. `preview` prints bounded, redacted JSON samples. See [replay formats and limits](docs/structured-logs.md#preview-replay-and-limits).
+Replay results go to the terminal; they do not change saved offsets or import into database/dashboard history. Without a default config, replay uses built-in monitor defaults and a filename-derived site. Configure formats/profiles before replaying structured sources. Historical host health is not reconstructed. When MaxMind is enabled, replay uses existing local databases for enrichment and ASN exclusions, with no downloads; their present metadata may differ from the logged period. `preview` prints bounded, redacted JSON samples. See [replay formats and limits](docs/structured-logs.md#preview-replay-and-limits).
 
 ## What it does
 
@@ -159,26 +159,27 @@ For each client and analysis window, ReqSentry adds the weights of matched signa
 | `HIGH_404_RATE` | 20 | At least 30 requests, 20 HTTP 404s, and a 404 ratio of 70% or more. |
 | `HIGH_404_DIVERSITY` | 25 | At least 20 HTTP 404s across 20 distinct missing paths, with distinct paths accounting for at least 60% of 404s.* |
 | `PATH_ENUMERATION` | 25 | At least 10 distinct missing paths sharing a pattern with numeric path segments. |
-| `QUERY_ENUMERATION` | 25 | One tracked query pattern with numeric values and at least 10 distinct targets. |
-| `HIGH_REQUEST_RATE` | 10 | At least 100 requests averaging 10 requests/second or more. |
+| `QUERY_ENUMERATION` | 10 | One tracked query pattern with numeric values and at least 10 distinct targets; supporting context, including ordinary pagination. |
+| `HIGH_REQUEST_RATE` | 15 | At least 100 requests averaging 10 requests/second or more. |
 | `HIGH_BURST_RATE` | 10 | A peak of at least 50 requests in one second. |
-| `SUSTAINED_HIGH_RATE` | 10 | Average rate of at least 10 requests/second, active in at least 80% of seconds, over a window of at least 10 seconds. |
-| `HIGH_5XX_CONTRIBUTION` | 10 | At least 30 requests, 10 HTTP 5xx responses, and a 5xx ratio of 20% or more. |
-| `HIGH_REDIRECT_RATIO` | 5 | At least 30 requests, 20 HTTP 301/302 responses, and a redirect ratio of 70% or more. |
-| `METHOD_404_SCAN` | 15 | At least 10 HTTP 404s and 10 distinct method/path pairs using POST, PUT, PATCH, DELETE, or OPTIONS. |
-| `MISSING_USER_AGENT` | 3 | At least 20 requests, 15 missing User-Agents, and a missing ratio of 70% or more. |
-| `USER_AGENT_ROTATION` | 5 | At least 20 requests, four distinct User-Agents, and six User-Agent switches. |
-| `AUTOMATED_USER_AGENT` | 3 | A sampled User-Agent contains `python-requests`, `curl/`, `wget/`, or `scrapy` (case-insensitive). |
-| `HOSTING_NETWORK` | 3 | Available MaxMind metadata identifies the client as a hosting user type. |
-| `CROSS_SITE_SCAN` | 15 | At least three sites, 50 requests, 30 HTTP 404s, a 404 ratio of 60% or more, and 20 distinct missing paths. |
-| `HIGH_TRAFFIC_SHARE` | 10 | At least 100 requests and 30% of traffic across configured access logs. |
-| `CPU_SPIKE_CONTRIBUTOR` | 15 | The same traffic-share criteria, alongside a CPU sample of at least 80% within five seconds of the window end. |
-| `PHP_FPM_SATURATION_CONTRIBUTOR` | 15 | The same traffic-share criteria, alongside a non-stale PHP-FPM sample with a nonempty listen queue within ten seconds of the window end. |
-| `HIGH_REQUEST_COST` | 15 | At least 10 requests and 10 request-time samples averaging 500 ms or more, with at least 10% of observed server traffic. |
+| `SUSTAINED_HIGH_RATE` | 15 | Average rate of at least 10 requests/second, active in at least 80% of seconds, over a window of at least 10 seconds. |
+| `WORDPRESS_ENDPOINT_FLOOD` | 30 | At least 100 requests to sitemap/dynamic WordPress endpoints, averaging 10 requests/second, active in at least 80% of seconds over a window of at least 10 seconds. |
+| `HIGH_5XX_CONTRIBUTION` | 5 | At least 30 requests, 10 HTTP 5xx responses, and a 5xx ratio of 20% or more. |
+| `HIGH_REDIRECT_RATIO` | 0 | At least 30 requests, 20 HTTP 301/302 responses, and a redirect ratio of 70% or more. |
+| `METHOD_404_SCAN` | 20 | At least 10 HTTP 404s and 10 distinct method/path pairs using POST, PUT, PATCH, DELETE, or OPTIONS. |
+| `MISSING_USER_AGENT` | 0 | At least 20 requests, 15 missing User-Agents, and a missing ratio of 70% or more. |
+| `USER_AGENT_ROTATION` | 0 | At least 20 requests, four distinct User-Agents, and six User-Agent switches. |
+| `AUTOMATED_USER_AGENT` | 0 | A sampled User-Agent contains `python-requests`, `curl/`, `wget/`, or `scrapy` (case-insensitive). |
+| `HOSTING_NETWORK` | 20 | Available MaxMind metadata identifies the client as a hosting user type. |
+| `CROSS_SITE_SCAN` | 20 | At least three sites, 50 requests, 30 HTTP 404s, a 404 ratio of 60% or more, and 20 distinct missing paths. |
+| `HIGH_TRAFFIC_SHARE` | 5 | At least 100 requests and 30% of traffic across configured access logs. |
+| `CPU_SPIKE_CONTRIBUTOR` | 5 | The same traffic-share criteria, alongside a CPU sample of at least 80% within five seconds of the window end. |
+| `PHP_FPM_SATURATION_CONTRIBUTOR` | 5 | The same traffic-share criteria, alongside a non-stale PHP-FPM sample with a nonempty listen queue within ten seconds of the window end. |
+| `HIGH_REQUEST_COST` | 10 | At least 10 requests and 10 request-time samples averaging 500 ms or more, with at least 10% of observed server traffic. |
 
 \* When missing-path tracking reaches its cap, the diversity rule uses the recorded distinct-path lower bound without requiring the 60% ratio. Rich-detail signals can be unavailable during degraded aggregation. Missing timings, health, or enrichment do not create evidence. Error-log associations and saved request samples add no points; resource-impact signals describe correlation, not proven causation.
 
-Weights, detection thresholds, and decision thresholds are configurable in the [config reference](configs/example.yaml). A weight of `0` disables that signal's score contribution.
+Weights, detection thresholds, and decision thresholds are configurable in the [config reference](configs/example.yaml). A weight of `0` keeps matched evidence visible but disables its score contribution. The default ruleset version is `2`.
 
 ## How to read a score
 
@@ -191,9 +192,13 @@ Default decision thresholds are configurable:
 | `SUSPICIOUS` | 60–79, or 80–100 without corroboration | Evidence needs investigation. |
 | `WOULD_BLOCK` | 80–100* | Meets the monitor-only blocking review threshold. |
 
-\* `WOULD_BLOCK` also requires a positively weighted strong signal (`HIGH_404_DIVERSITY`, `PATH_ENUMERATION`, or `QUERY_ENUMERATION`), or positively weighted signals from at least two behavioral groups: rate, 404 ratio, server errors, method scans, cross-site scans, and impact. All three rate signals count as one group; traffic share, CPU, PHP-FPM, and request cost count as one impact group. Redirect and User-Agent signals and hosting metadata add supporting points but do not satisfy this corroboration requirement.
+\* `WOULD_BLOCK` also requires a positively weighted strong signal (`HIGH_404_DIVERSITY`, `PATH_ENUMERATION`, or `WORDPRESS_ENDPOINT_FLOOD`), or positively weighted signals from at least two behavioral groups: rate, method scans, and cross-site scans. All three rate signals count as one group. Numeric queries, 404/5xx ratios, resource impact, redirects, User-Agents, and hosting metadata are supporting context and do not supply this corroboration.
 
-For example, high 404 rate (20) + diverse missing paths (25) + numeric path enumeration (25) + method scans (15) = **85, `WOULD_BLOCK`**. The strong signals satisfy corroboration. Scores summarize configured detection evidence; they are not probabilities. A network or country is not deemed malicious because one client generated an incident.
+For example, high 404 rate (20) + diverse missing paths (25) + numeric path enumeration (25) + method scans (20) = **90, `WOULD_BLOCK`**. The strong signals satisfy corroboration. Scores summarize configured detection evidence; they are not probabilities. A network or country is not deemed malicious because one client generated an incident.
+
+For WordPress, a hosting IP averaging 10 requests/second against sitemaps for a full 30-second site window scores **80**: high rate (15) + sustained rate (15) + WordPress endpoint flood (30) + hosting (20). The endpoint flood supplies the strong signal. Ordinary sitemap fetches do not meet that flood threshold.
+
+AS15169 is excluded from incident scoring when enabled local MaxMind ASN data identifies it; traffic totals still include those requests. Unknown ASNs remain monitored. This is an ASN-wide exception, not Googlebot verification. See [WordPress scoring and exclusions](docs/scoring.md) for endpoint coverage, research, and tuning.
 
 In the demo, `203.0.113.31` has fictional Germany/hosting metadata and repeatedly enumerates numeric paths with non-GET 404s. Its saved site incident reaches `WOULD_BLOCK` using the default rules. Normal browser clients are present alongside less severe incidents.
 
@@ -266,6 +271,7 @@ CI includes Go and dashboard regressions, configuration checks, dependency audit
 | --- | --- |
 | Demo and example traffic | [Demo](docs/demo.md) |
 | Engine, CLI reports, and maintenance commands | [CLI guide](docs/cli.md) · [Linux install](docs/install.md) |
+| WordPress scoring, ASN exclusions, and tuning | [Scoring guide](docs/scoring.md) |
 | Every supported configuration setting | [Configuration reference](configs/example.yaml) |
 | Dashboard access, API, and data semantics | [Dashboard](docs/dashboard.md) |
 | Nginx/Apache and structured log formats | [Access logs](docs/access-logs.md) · [JSON/logfmt/ECS](docs/structured-logs.md) |

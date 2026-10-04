@@ -11,21 +11,26 @@ type DetectionConfig struct {
 	WatchScore      int                `yaml:"watch_score"`
 	SuspiciousScore int                `yaml:"suspicious_score"`
 	WouldBlockScore int                `yaml:"would_block_score"`
+	ExcludedASNs    []uint32           `yaml:"excluded_asns"`
 	Weights         map[string]int     `yaml:"weights"`
 	Thresholds      map[string]float64 `yaml:"thresholds"`
 }
 
+// Prioritize scan behavior over automation or shared-address metadata. Query
+// variation and resource impact retain small contextual weights; neither is
+// proof of abusive intent. See docs/scoring.md for rationale and calibration.
 var defaultWeights = map[string]int{
 	"HIGH_404_RATE": 20, "HIGH_404_DIVERSITY": 25,
-	"PATH_ENUMERATION": 25, "QUERY_ENUMERATION": 25,
-	"HIGH_REQUEST_RATE": 10, "HIGH_BURST_RATE": 10, "SUSTAINED_HIGH_RATE": 10,
-	"HIGH_5XX_CONTRIBUTION": 10, "HIGH_REDIRECT_RATIO": 5,
-	"METHOD_404_SCAN": 15, "MISSING_USER_AGENT": 3,
-	"USER_AGENT_ROTATION": 5, "AUTOMATED_USER_AGENT": 3,
-	"HOSTING_NETWORK": 3,
-	"CROSS_SITE_SCAN": 15, "HIGH_TRAFFIC_SHARE": 10,
-	"CPU_SPIKE_CONTRIBUTOR": 15, "PHP_FPM_SATURATION_CONTRIBUTOR": 15,
-	"HIGH_REQUEST_COST": 15,
+	"PATH_ENUMERATION": 25, "QUERY_ENUMERATION": 10,
+	"HIGH_REQUEST_RATE": 15, "HIGH_BURST_RATE": 10, "SUSTAINED_HIGH_RATE": 15,
+	"WORDPRESS_ENDPOINT_FLOOD": 30,
+	"HIGH_5XX_CONTRIBUTION":    5, "HIGH_REDIRECT_RATIO": 0,
+	"METHOD_404_SCAN": 20, "MISSING_USER_AGENT": 0,
+	"USER_AGENT_ROTATION": 0, "AUTOMATED_USER_AGENT": 0,
+	"HOSTING_NETWORK": 20,
+	"CROSS_SITE_SCAN": 20, "HIGH_TRAFFIC_SHARE": 5,
+	"CPU_SPIKE_CONTRIBUTOR": 5, "PHP_FPM_SATURATION_CONTRIBUTOR": 5,
+	"HIGH_REQUEST_COST": 10,
 }
 
 var defaultThresholds = map[string]float64{
@@ -43,11 +48,13 @@ var defaultThresholds = map[string]float64{
 	"cross_site_min_404_count": 30, "cross_site_404_ratio": 0.60, "cross_site_min_unique404": 20,
 	"high_share_min_requests": 100, "high_share_ratio": 0.30,
 	"cpu_pressure_percent": 80, "high_cost_min_samples": 10, "high_cost_ms": 500,
+	"wordpress_min_requests": 100, "wordpress_rps": 10, "wordpress_active_ratio": 0.80,
 }
 
 func DefaultDetectionConfig() DetectionConfig {
-	result := DetectionConfig{RulesetVersion: 1, WatchScore: 30, SuspiciousScore: 60, WouldBlockScore: 80,
-		Weights: make(map[string]int, len(defaultWeights)), Thresholds: make(map[string]float64, len(defaultThresholds))}
+	result := DetectionConfig{RulesetVersion: 2, WatchScore: 30, SuspiciousScore: 60, WouldBlockScore: 80,
+		ExcludedASNs: []uint32{15169},
+		Weights:      make(map[string]int, len(defaultWeights)), Thresholds: make(map[string]float64, len(defaultThresholds))}
 	for key, value := range defaultWeights {
 		result.Weights[key] = value
 	}
@@ -70,6 +77,19 @@ func (d *DetectionConfig) Validate() error {
 	}
 	if d.WouldBlockScore == 0 {
 		d.WouldBlockScore = defaults.WouldBlockScore
+	}
+	if d.ExcludedASNs == nil {
+		d.ExcludedASNs = defaults.ExcludedASNs
+	}
+	if len(d.ExcludedASNs) > 64 {
+		return fmt.Errorf("detection.excluded_asns supports at most 64 ASNs")
+	}
+	seenASNs := make(map[uint32]bool)
+	for _, asn := range d.ExcludedASNs {
+		if asn == 0 || seenASNs[asn] {
+			return fmt.Errorf("detection.excluded_asns requires unique nonzero ASN numbers")
+		}
+		seenASNs[asn] = true
 	}
 	if d.RulesetVersion < 1 || d.WatchScore < 1 || d.WatchScore >= d.SuspiciousScore || d.SuspiciousScore >= d.WouldBlockScore || d.WouldBlockScore > 100 {
 		return fmt.Errorf("detection ruleset version or decision score thresholds are invalid")
@@ -95,4 +115,17 @@ func (d *DetectionConfig) Validate() error {
 	d.Weights = defaults.Weights
 	d.Thresholds = defaults.Thresholds
 	return nil
+}
+
+// ExcludesASN applies only to resolved local metadata; nil is unknown, not safe.
+func (d DetectionConfig) ExcludesASN(asn *uint32) bool {
+	if asn == nil {
+		return false
+	}
+	for _, excluded := range d.ExcludedASNs {
+		if *asn == excluded {
+			return true
+		}
+	}
+	return false
 }

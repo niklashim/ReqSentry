@@ -52,6 +52,14 @@ type Signal struct {
 
 type SignalStrength string
 
+// Counts analysis windows, not distinct IPs or requests. Unknown ASN windows
+// remain eligible for detection; missing metadata never grants an exclusion.
+type ASNExclusionStatus struct {
+	Configured      []uint32 `json:"configured"`
+	ExcludedWindows uint64   `json:"excluded_windows"`
+	UnknownWindows  uint64   `json:"unknown_windows"`
+}
+
 const (
 	SignalSupporting SignalStrength = "supporting"
 	SignalBehavioral SignalStrength = "behavioral"

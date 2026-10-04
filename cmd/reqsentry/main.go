@@ -192,6 +192,12 @@ func run(args []string, stdout, stderr io.Writer) int {
 				fmt.Fprintln(stderr, err)
 				return 1
 			}
+			if len(summary.ASNExclusions.Configured) > 0 {
+				if _, err := fmt.Fprintf(stdout, "ASN exclusions: %v  excluded windows=%d  unresolved windows=%d  local MaxMind=%s\n", summary.ASNExclusions.Configured, summary.ASNExclusions.ExcludedWindows, summary.ASNExclusions.UnknownWindows, summary.MaxMind); err != nil {
+					fmt.Fprintln(stderr, err)
+					return 1
+				}
+			}
 			return 0
 		}
 		if err := encoder.Encode(struct {

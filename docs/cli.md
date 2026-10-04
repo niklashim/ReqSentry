@@ -20,7 +20,7 @@ Without a command, the engine runs until SIGINT/SIGTERM. On Linux, install the [
 
 Reports default to a readable table of detection time (UTC), IP, configured site, score, decision, request count, peak requests/second, country when available, and evidence codes. `-details` adds the server, window, ruleset, signal weights/strengths, and saved requests. Text from logs/config is bounded and stripped of terminal control characters. Limits range from 1 to 1,000; filters apply before the limit. An IPv4-mapped IPv6 filter is normalized to IPv4. Site IDs match exactly; an empty incident site is displayed as “All sites”. Server-wide and site-specific findings can both be present.
 
-These are recent retained incident windows, not the current status of every client. No incident does not certify safety; normal traffic is not saved as incidents. Expired data is excluded using configured retention even when physical cleanup is delayed. A daemon heartbeat older than 30 seconds is displayed as stopped. `-json status` retains the full heartbeat, including health, recovery, resource and delivery counters. For scripts that consume JSON, add `-json` to status, report, or replay.
+These are recent retained incident windows, not the current status of every client. No incident does not certify safety; normal traffic is not saved as incidents. Expired data is excluded using configured retention even when physical cleanup is delayed. A daemon heartbeat older than 30 seconds is displayed as stopped. `-json status` retains the full heartbeat, including health, recovery, resource, delivery, and ASN exclusion counters. Exclusions count analyzed site/server windows; unresolved ASNs remain monitored. For scripts that consume JSON, add `-json` to status, report, or replay.
 
 `preview LOG` and `prune preview` remain JSON. MaxMind commands also return structured JSON. Validation, preview, report, and replay do not send remote messages. Report/status open the existing database using the service's storage setup; use the service account or root. The database must have been initialized by the engine, except MaxMind commands can initialize scheduler state before the first monitor run.
 
@@ -32,7 +32,7 @@ reqsentry -config /etc/reqsentry/config.yaml replay /path/to/site1.log /path/to/
 reqsentry -config /etc/reqsentry/config.yaml -json replay /path/to/site1.log
 ```
 
-Replay streams readable findings with a final parsed/malformed/allowlisted/dropped/error/incident summary. `-json` emits one JSON incident per line and a final `summary` object. Multiple sources are merged by recorded time. Replay does not persist results, change watcher offsets, send notifications, reconstruct historical health, or enable MaxMind. See [structured sources and replay](structured-logs.md#preview-replay-and-limits).
+Replay streams readable findings with a final parsed/malformed/allowlisted/dropped/error/incident summary. `-json` emits one JSON incident per line and a final `summary` object. Multiple sources are merged by recorded time. Replay does not persist results, change watcher offsets, send notifications, reconstruct historical health, or download MaxMind data. Enabled MaxMind uses existing local MMDBs for enrichment and ASN exclusions; metadata reflects those files, not the historical request time. See [structured sources and replay](structured-logs.md#preview-replay-and-limits).
 
 ## Notifications
 

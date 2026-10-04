@@ -67,7 +67,7 @@ reqsentry -config /etc/reqsentry/config.yaml -json replay /path/to/site1.access.
 
 Configure formats/profiles before replaying structured sources. The default output is readable findings and a summary; `-json` emits one JSON incident per line followed by a `summary` object with parsed, malformed, allowlisted, dropped, error, incident, and per-source counts.
 
-Review `SUSPICIOUS` and `WOULD_BLOCK` findings alongside normal browser, API, crawler, and monitoring traffic. Check the evidence, site identity, score thresholds, and allowlist behavior. Compare the same input before and after configuration changes. Replay does not reconstruct historical host health or enable MaxMind, so live scores can differ.
+Review `SUSPICIOUS` and `WOULD_BLOCK` findings alongside normal browser, API, crawler, and monitoring traffic. Check the evidence, site identity, score thresholds, and allowlist behavior. Compare the same input before and after configuration changes. Replay does not reconstruct historical host health. Enabled MaxMind reads existing local databases without downloading; their present metadata can differ from the logged period. See [scoring calibration](scoring.md#calibrate-for-your-site).
 
 Keep production logs and replay output in a restricted location outside the repository. Synthetic demo traffic exercises the pipeline; it does not establish production false-positive rates or capacity.
 

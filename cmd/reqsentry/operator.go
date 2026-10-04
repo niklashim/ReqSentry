@@ -171,6 +171,16 @@ func printStatus(w io.Writer, s daemon.Status, server string) error {
 	if err != nil {
 		return err
 	}
+	if len(s.ASNExclusions.Configured) > 0 {
+		if _, err = fmt.Fprintf(w, "ASN exclusions: %v  excluded windows=%d  unresolved windows=%d\n", s.ASNExclusions.Configured, s.ASNExclusions.ExcludedWindows, s.ASNExclusions.UnknownWindows); err != nil {
+			return err
+		}
+		if s.MaxMind != "available" {
+			if _, err = fmt.Fprintln(w, "ASN exclusions require local ASN data; unresolved clients remain monitored."); err != nil {
+				return err
+			}
+		}
+	}
 	if !s.Health.Timestamp.IsZero() {
 		cpu, memory, load := "unavailable", "unavailable", "unavailable"
 		if s.Health.CPUPercent != nil {

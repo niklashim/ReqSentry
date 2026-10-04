@@ -11,7 +11,8 @@ import (
 )
 
 // Impact correlates a server-wide IP window with all observed traffic and
-// nearby health samples. Its evidence explicitly avoids claiming causality.
+// nearby health samples. Its supporting evidence cannot supply independent
+// abuse corroboration: legitimate clients also experience server overload.
 func Impact(global aggregator.Snapshot, allRequests uint64, siteCount int, health serverhealth.Snapshot, pools []phpfpm.State) []model.Signal {
 	return ImpactWithRules(global, allRequests, siteCount, health, pools, config.DefaultDetectionConfig())
 }
@@ -30,13 +31,13 @@ func ImpactWithRules(global aggregator.Snapshot, allRequests uint64, siteCount i
 	}
 	share := ratio(global.Requests, allRequests)
 	if float64(global.Requests) >= t["high_share_min_requests"] && share >= t["high_share_ratio"] {
-		signals = append(signals, signal("HIGH_TRAFFIC_SHARE", model.SignalBehavioral, map[string]any{
+		signals = append(signals, signal("HIGH_TRAFFIC_SHARE", model.SignalSupporting, map[string]any{
 			"requests": global.Requests, "observed_server_requests": allRequests,
 			"share": share, "coverage": "configured access logs only",
 		}))
 	}
 	if float64(global.Requests) >= t["high_share_min_requests"] && share >= t["high_share_ratio"] && health.CPUPercent != nil && aligned(global.At, health.Timestamp, 5*time.Second) && *health.CPUPercent >= t["cpu_pressure_percent"] {
-		signals = append(signals, signal("CPU_SPIKE_CONTRIBUTOR", model.SignalBehavioral, map[string]any{
+		signals = append(signals, signal("CPU_SPIKE_CONTRIBUTOR", model.SignalSupporting, map[string]any{
 			"cpu_percent": *health.CPUPercent, "traffic_share": share,
 			"relationship": "time-aligned correlation, not proven causation",
 		}))
@@ -46,7 +47,7 @@ func ImpactWithRules(global aggregator.Snapshot, allRequests uint64, siteCount i
 			if pool.Stale || pool.Stats == nil || pool.Stats.ListenQueue == nil || *pool.Stats.ListenQueue == 0 || !aligned(global.At, pool.SampledAt, 10*time.Second) {
 				continue
 			}
-			signals = append(signals, signal("PHP_FPM_SATURATION_CONTRIBUTOR", model.SignalBehavioral, map[string]any{
+			signals = append(signals, signal("PHP_FPM_SATURATION_CONTRIBUTOR", model.SignalSupporting, map[string]any{
 				"pool": pool.Name, "listen_queue": *pool.Stats.ListenQueue,
 				"traffic_share": share, "relationship": "time-aligned correlation, not proven causation",
 			}))
@@ -55,7 +56,7 @@ func ImpactWithRules(global aggregator.Snapshot, allRequests uint64, siteCount i
 	if float64(global.RequestTimeSamples) >= t["high_cost_min_samples"] && global.Requests >= 10 && share >= 0.10 {
 		averageNanos := global.RequestTimeNanos / global.RequestTimeSamples
 		if float64(averageNanos)/float64(time.Millisecond) >= t["high_cost_ms"] {
-			signals = append(signals, signal("HIGH_REQUEST_COST", model.SignalBehavioral, map[string]any{
+			signals = append(signals, signal("HIGH_REQUEST_COST", model.SignalSupporting, map[string]any{
 				"average_request_ms": float64(averageNanos) / float64(time.Millisecond),
 				"timed_requests":     global.RequestTimeSamples, "traffic_share": share,
 			}))

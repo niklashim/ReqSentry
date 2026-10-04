@@ -128,7 +128,7 @@ func TestAnalysisProducesMonitorOnlyIncident(t *testing.T) {
 		t.Fatalf("expected site and global incidents, got %d", len(incidents))
 	}
 	for _, incident := range incidents {
-		if incident.Decision != model.DecisionWouldBlock || !incident.MonitorOnly || incident.RulesetVersion != 1 || len(incident.Signals) < 3 {
+		if incident.Decision != model.DecisionWouldBlock || !incident.MonitorOnly || incident.RulesetVersion != cfg.Detection.RulesetVersion || len(incident.Signals) < 3 {
 			t.Fatalf("incident missing explanation or monitor boundary: %+v", incident)
 		}
 		if incident.EnrichmentStatus != "available" || incident.ASN == nil || *incident.ASN != 14671 || incident.Country != "US" {

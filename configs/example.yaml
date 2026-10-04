@@ -191,7 +191,11 @@ access_files:
 # Weights range from 0 to 100; zero disables that signal's score contribution.
 # Thresholds must be positive; ratios are fractions from 0 to 1.
 # detection:
-#   ruleset_version: 1
+#   ruleset_version: 2
+#   # AS15169 is excluded when local MaxMind ASN data identifies it.
+#   # Requires an ASN-capable MMDB; unknown ASN clients remain monitored.
+#   # This excludes the whole ASN, not only verified Googlebot. [] opts out.
+#   excluded_asns: [15169]
 #   watch_score: 30
 #   suspicious_score: 60
 #   would_block_score: 80
@@ -199,23 +203,27 @@ access_files:
 #     HIGH_404_RATE: 20
 #     HIGH_404_DIVERSITY: 25
 #     PATH_ENUMERATION: 25
-#     QUERY_ENUMERATION: 25
-#     HIGH_REQUEST_RATE: 10
+#     QUERY_ENUMERATION: 10
+#     HIGH_REQUEST_RATE: 15
 #     HIGH_BURST_RATE: 10
-#     SUSTAINED_HIGH_RATE: 10
-#     HIGH_5XX_CONTRIBUTION: 10
-#     HIGH_REDIRECT_RATIO: 5
-#     METHOD_404_SCAN: 15
-#     MISSING_USER_AGENT: 3
-#     USER_AGENT_ROTATION: 5
-#     AUTOMATED_USER_AGENT: 3
-#     HOSTING_NETWORK: 3
-#     CROSS_SITE_SCAN: 15
-#     HIGH_TRAFFIC_SHARE: 10
-#     CPU_SPIKE_CONTRIBUTOR: 15
-#     PHP_FPM_SATURATION_CONTRIBUTOR: 15
-#     HIGH_REQUEST_COST: 15
+#     SUSTAINED_HIGH_RATE: 15
+#     WORDPRESS_ENDPOINT_FLOOD: 30
+#     HIGH_5XX_CONTRIBUTION: 5
+#     HIGH_REDIRECT_RATIO: 0
+#     METHOD_404_SCAN: 20
+#     MISSING_USER_AGENT: 0
+#     USER_AGENT_ROTATION: 0
+#     AUTOMATED_USER_AGENT: 0
+#     HOSTING_NETWORK: 20
+#     CROSS_SITE_SCAN: 20
+#     HIGH_TRAFFIC_SHARE: 5
+#     CPU_SPIKE_CONTRIBUTOR: 5
+#     PHP_FPM_SATURATION_CONTRIBUTOR: 5
+#     HIGH_REQUEST_COST: 10
 #   thresholds:
+#     wordpress_min_requests: 100
+#     wordpress_rps: 10
+#     wordpress_active_ratio: 0.80
 #     high_404_min_requests: 30
 #     high_404_min_count: 20
 #     high_404_ratio: 0.70

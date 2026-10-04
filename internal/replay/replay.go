@@ -18,6 +18,7 @@ import (
 	"github.com/niklashim/ReqSentry/internal/config"
 	"github.com/niklashim/ReqSentry/internal/correlation"
 	"github.com/niklashim/ReqSentry/internal/detector"
+	"github.com/niklashim/ReqSentry/internal/enrichment"
 	"github.com/niklashim/ReqSentry/internal/model"
 	"github.com/niklashim/ReqSentry/internal/parser"
 	"github.com/niklashim/ReqSentry/internal/scoring"
@@ -25,13 +26,15 @@ import (
 )
 
 type Summary struct {
-	Sources     map[string]*SourceSummary `json:"sources,omitempty"`
-	ErrorEvents uint64                    `json:"error_events"`
-	Parsed      uint64                    `json:"parsed"`
-	BadLines    uint64                    `json:"bad_lines"`
-	Allowlisted uint64                    `json:"allowlisted"`
-	Dropped     uint64                    `json:"dropped"`
-	Incidents   uint64                    `json:"incidents"`
+	Sources       map[string]*SourceSummary `json:"sources,omitempty"`
+	ErrorEvents   uint64                    `json:"error_events"`
+	Parsed        uint64                    `json:"parsed"`
+	BadLines      uint64                    `json:"bad_lines"`
+	Allowlisted   uint64                    `json:"allowlisted"`
+	Dropped       uint64                    `json:"dropped"`
+	Incidents     uint64                    `json:"incidents"`
+	MaxMind       string                    `json:"maxmind"`
+	ASNExclusions model.ASNExclusionStatus  `json:"asn_exclusions"`
 }
 
 type source struct {
@@ -98,7 +101,8 @@ func Run(ctx context.Context, paths []string, cfg config.Config, emit func(model
 
 // RunSections bounds crash recovery to captured file identities and complete-line ranges.
 func RunSections(ctx context.Context, paths []string, cfg config.Config, sections map[string]Section, emit func(model.Incident) error, observe func(model.RequestEvent, bool), observeError func(model.ErrorEvent)) (Summary, error) {
-	summary := Summary{Sources: map[string]*SourceSummary{}}
+	summary := Summary{Sources: map[string]*SourceSummary{}, MaxMind: "disabled"}
+	summary.ASNExclusions.Configured = cfg.Detection.ExcludedASNs
 	errorsEngine := correlation.New(cfg.Correlation, len(cfg.ErrorFiles) > 0)
 	if len(paths) == 0 {
 		return summary, fmt.Errorf("replay requires at least one access log")
@@ -106,6 +110,18 @@ func RunSections(ctx context.Context, paths []string, cfg config.Config, section
 	resolver, err := clientidentity.New(cfg)
 	if err != nil {
 		return summary, err
+	}
+	var geo *enrichment.Manager
+	if cfg.MaxMind.Enabled {
+		var err error
+		geo, err = enrichment.New(cfg.MaxMind.DatabaseDir)
+		if geo != nil {
+			defer geo.Close()
+		}
+		summary.MaxMind = "available"
+		if err != nil {
+			summary.MaxMind = "unavailable"
+		}
 	}
 	scorer, err := scoring.New(cfg.Detection)
 	if err != nil {
@@ -202,8 +218,25 @@ func RunSections(ctx context.Context, paths []string, cfg config.Config, section
 			if len(signals) == 0 {
 				continue
 			}
-			incident := scorer.Evaluate(scoring.Input{Server: cfg.Server.Name, Snapshot: snapshot, Signals: signals, AllRequests: all})
-			incident.EnrichmentStatus = "disabled"
+			metadata, geoStatus := enrichment.Result{}, summary.MaxMind
+			if geo != nil && geo.Available() {
+				var lookupErr error
+				metadata, lookupErr = geo.Lookup(snapshot.ClientIP)
+				if lookupErr != nil {
+					metadata, geoStatus = enrichment.Result{}, "lookup_error"
+				} else if !metadata.Found {
+					geoStatus = "not_found"
+				}
+			}
+			if len(cfg.Detection.ExcludedASNs) > 0 {
+				if metadata.ASN == nil {
+					summary.ASNExclusions.UnknownWindows++
+				} else if cfg.Detection.ExcludesASN(metadata.ASN) {
+					summary.ASNExclusions.ExcludedWindows++
+					continue
+				}
+			}
+			incident := scorer.Evaluate(scoring.Input{Server: cfg.Server.Name, Snapshot: snapshot, Signals: signals, AllRequests: all, Enrichment: metadata, EnrichmentStatus: geoStatus})
 			incident.Errors = errorsEngine.Context(incident)
 			if incident.Decision == model.DecisionNormal {
 				continue

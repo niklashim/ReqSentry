@@ -26,7 +26,8 @@ func HTTPWithRules(snapshot aggregator.Snapshot, rules config.DetectionConfig) [
 	}
 	notFound := snapshot.ImportantStatuses[404]
 	if float64(requests) >= t["high_404_min_requests"] && float64(notFound) >= t["high_404_min_count"] && ratio(notFound, requests) >= t["high_404_ratio"] {
-		signals = append(signals, signal("HIGH_404_RATE", model.SignalBehavioral, map[string]any{
+		// A broken shared asset can produce many 404s without any scanning.
+		signals = append(signals, signal("HIGH_404_RATE", model.SignalSupporting, map[string]any{
 			"requests": requests, "status_404": notFound, "ratio": ratio(notFound, requests),
 		}))
 	}
@@ -57,13 +58,22 @@ func HTTPWithRules(snapshot aggregator.Snapshot, rules config.DetectionConfig) [
 		}
 	}
 	if len(snapshot.QueryPatternSamples) == 1 && !snapshot.Saturation.QueryPatterns && strings.Contains(snapshot.QueryPatternSamples[0], "{NUMBER}") && float64(snapshot.UniqueQueryValues) >= t["query_enumeration_min"] {
-		signals = append(signals, signal("QUERY_ENUMERATION", model.SignalStrong, map[string]any{
+		// Numeric queries also describe pagination and legitimate API clients.
+		// Without endpoint-specific outcomes they are supporting context only.
+		signals = append(signals, signal("QUERY_ENUMERATION", model.SignalSupporting, map[string]any{
 			"pattern": snapshot.QueryPatternSamples[0], "distinct_targets_at_least": snapshot.UniqueQueryValues,
 			"saturated": snapshot.Saturation.QueryValues,
 		}))
 	}
 	seconds := snapshot.Window.Seconds()
 	if seconds > 0 {
+		if seconds >= 10 && float64(snapshot.WordPressRequests) >= t["wordpress_min_requests"] && float64(snapshot.WordPressRequests)/seconds >= t["wordpress_rps"] && snapshot.WordPressActiveSeconds >= int(math.Ceil(seconds*t["wordpress_active_ratio"])) {
+			signals = append(signals, signal("WORDPRESS_ENDPOINT_FLOOD", model.SignalStrong, map[string]any{
+				"wordpress_requests": snapshot.WordPressRequests, "window_seconds": seconds,
+				"average_rps": float64(snapshot.WordPressRequests) / seconds, "active_seconds": snapshot.WordPressActiveSeconds,
+				"relationship": "sustained endpoint pressure, not proof of malicious intent",
+			}))
+		}
 		rate := float64(requests) / seconds
 		if float64(requests) >= t["high_rate_min_requests"] && rate >= t["high_rate_rps"] {
 			signals = append(signals, signal("HIGH_REQUEST_RATE", model.SignalBehavioral, map[string]any{
@@ -83,7 +93,8 @@ func HTTPWithRules(snapshot aggregator.Snapshot, rules config.DetectionConfig) [
 	}
 	serverErrors := snapshot.StatusFamilies[5]
 	if float64(requests) >= t["high_5xx_min_requests"] && float64(serverErrors) >= t["high_5xx_min_count"] && ratio(serverErrors, requests) >= t["high_5xx_ratio"] {
-		signals = append(signals, signal("HIGH_5XX_CONTRIBUTION", model.SignalBehavioral, map[string]any{
+		// Server failures can affect legitimate clients during an outage.
+		signals = append(signals, signal("HIGH_5XX_CONTRIBUTION", model.SignalSupporting, map[string]any{
 			"requests": requests, "status_5xx": serverErrors, "ratio": ratio(serverErrors, requests),
 		}))
 	}

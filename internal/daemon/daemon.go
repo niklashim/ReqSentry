@@ -52,6 +52,8 @@ type Daemon struct {
 	}
 	notificationStatus func() []output.DeliveryStatus
 	maxMindStatus      string
+	asnExcludedWindows atomic.Uint64
+	asnUnknownWindows  atomic.Uint64
 	slackStatus        string
 	webStatus          atomic.Pointer[WebStatus]
 	rollup             atomic.Pointer[aggregator.Aggregator]
@@ -65,19 +67,20 @@ type WebStatus struct {
 }
 
 type Status struct {
-	Recovery      RecoveryStatus          `json:"recovery"`
-	Storage       storage.RetentionStatus `json:"storage"`
-	Notifications []output.DeliveryStatus `json:"notifications,omitempty"`
-	UpdatedAt     time.Time               `json:"updated_at"`
-	Running       bool                    `json:"running"`
-	TriggerActive bool                    `json:"trigger_active"`
-	Health        serverhealth.Snapshot   `json:"health"`
-	WatchedLogs   []watcher.Status        `json:"watched_logs"`
-	Aggregation   aggregator.Metrics      `json:"aggregation"`
-	SQLite        string                  `json:"sqlite"`
-	MaxMind       string                  `json:"maxmind"`
-	Slack         string                  `json:"slack"`
-	Web           WebStatus               `json:"web"`
+	Recovery      RecoveryStatus           `json:"recovery"`
+	Storage       storage.RetentionStatus  `json:"storage"`
+	Notifications []output.DeliveryStatus  `json:"notifications,omitempty"`
+	UpdatedAt     time.Time                `json:"updated_at"`
+	Running       bool                     `json:"running"`
+	TriggerActive bool                     `json:"trigger_active"`
+	Health        serverhealth.Snapshot    `json:"health"`
+	WatchedLogs   []watcher.Status         `json:"watched_logs"`
+	Aggregation   aggregator.Metrics       `json:"aggregation"`
+	SQLite        string                   `json:"sqlite"`
+	MaxMind       string                   `json:"maxmind"`
+	ASNExclusions model.ASNExclusionStatus `json:"asn_exclusions"`
+	Slack         string                   `json:"slack"`
+	Web           WebStatus                `json:"web"`
 }
 
 func New(cfg config.Config, logger *log.Logger) *Daemon {
@@ -347,6 +350,7 @@ func (d *Daemon) Run(ctx context.Context) error {
 				slackStatus = "disabled"
 			}
 			status := Status{Recovery: recoveryStatus, UpdatedAt: time.Now().UTC(), Running: running, TriggerActive: d.trigger.Active(), Health: health, WatchedLogs: manager.Status(), Aggregation: rollup.Metrics(), SQLite: "available", MaxMind: maxmindStatus, Slack: slackStatus}
+			status.ASNExclusions = model.ASNExclusionStatus{Configured: d.config.Detection.ExcludedASNs, ExcludedWindows: d.asnExcludedWindows.Load(), UnknownWindows: d.asnUnknownWindows.Load()}
 			if d.notificationStatus != nil {
 				status.Notifications = d.notificationStatus()
 			}
@@ -609,21 +613,27 @@ func (d *Daemon) analyzeOnce(rollup *aggregator.Aggregator, scorer *scoring.Engi
 			case lookupErr != nil:
 				status = "lookup_error"
 				d.logger.Printf("MaxMind lookup failed ip=%s: %v", snapshot.ClientIP, lookupErr)
+				enrichmentResult = enrichment.Result{}
 			case !enrichmentResult.Available:
 				status = "unavailable"
 			case !enrichmentResult.Found:
 				status = "not_found"
 			default:
 				status = "available"
-				if strings.EqualFold(enrichmentResult.NetworkType, "hosting") {
-					signals = append(signals, model.Signal{Code: "HOSTING_NETWORK", Strength: model.SignalSupporting,
-						Evidence: map[string]any{"network_type": enrichmentResult.NetworkType}})
-				}
+			}
+		}
+		if len(d.config.Detection.ExcludedASNs) > 0 {
+			if enrichmentResult.ASN == nil {
+				d.asnUnknownWindows.Add(1)
+			} else if d.config.Detection.ExcludesASN(enrichmentResult.ASN) {
+				d.asnExcludedWindows.Add(1)
+				continue
 			}
 		}
 		incident := scorer.Evaluate(scoring.Input{
 			Server: d.config.Server.Name, Snapshot: snapshot, Signals: signals,
 			AllRequests: allRequests, Health: health, PHPFPM: pools,
+			Enrichment: enrichmentResult, EnrichmentStatus: status,
 		})
 		incident.Errors = d.errors.Context(incident)
 		for _, source := range d.ErrorSources() {
@@ -631,12 +641,6 @@ func (d *Daemon) analyzeOnce(rollup *aggregator.Aggregator, scorer *scoring.Engi
 				incident.Errors.UnavailableSources = append(incident.Errors.UnavailableSources, source.Path)
 			}
 		}
-		incident.EnrichmentStatus = status
-		incident.ASN = enrichmentResult.ASN
-		incident.ASNOrganization = enrichmentResult.ASNOrganization
-		incident.ISP = enrichmentResult.ISP
-		incident.NetworkType = enrichmentResult.NetworkType
-		incident.Country = enrichmentResult.Country
 		if incident.Decision == model.DecisionNormal {
 			continue
 		}

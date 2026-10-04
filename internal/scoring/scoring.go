@@ -4,10 +4,12 @@ package scoring
 
 import (
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/niklashim/ReqSentry/internal/aggregator"
 	"github.com/niklashim/ReqSentry/internal/config"
+	"github.com/niklashim/ReqSentry/internal/enrichment"
 	"github.com/niklashim/ReqSentry/internal/model"
 	"github.com/niklashim/ReqSentry/internal/phpfpm"
 	"github.com/niklashim/ReqSentry/internal/serverhealth"
@@ -18,12 +20,14 @@ type Engine struct {
 }
 
 type Input struct {
-	Server      string
-	Snapshot    aggregator.Snapshot
-	Signals     []model.Signal
-	AllRequests uint64
-	Health      serverhealth.Snapshot
-	PHPFPM      []phpfpm.State
+	Server           string
+	Snapshot         aggregator.Snapshot
+	Signals          []model.Signal
+	AllRequests      uint64
+	Health           serverhealth.Snapshot
+	PHPFPM           []phpfpm.State
+	Enrichment       enrichment.Result
+	EnrichmentStatus string
 }
 
 func New(rules config.DetectionConfig) (*Engine, error) {
@@ -47,6 +51,17 @@ func (e *Engine) Evaluate(input Input) model.Incident {
 		MethodCounts: cloneMethodCounts(snapshot.Methods), UniquePaths: snapshot.UniquePaths,
 		Unique404Paths:   snapshot.Unique404Paths,
 		EvidenceDegraded: snapshot.Saturation.Degraded,
+	}
+	incident.EnrichmentStatus = input.EnrichmentStatus
+	if incident.EnrichmentStatus == "" {
+		incident.EnrichmentStatus = "disabled"
+	}
+	geo := input.Enrichment
+	incident.ASN, incident.ASNOrganization, incident.ISP = geo.ASN, geo.ASNOrganization, geo.ISP
+	incident.NetworkType, incident.Country = geo.NetworkType, geo.Country
+	if geo.Available && geo.Found && e.rules.ExcludesASN(geo.ASN) {
+		incident.EnsureEventID()
+		return incident
 	}
 	for _, item := range []struct {
 		name       string
@@ -98,7 +113,11 @@ func (e *Engine) Evaluate(input Input) model.Incident {
 	seen := make(map[string]bool)
 	groups := make(map[string]bool)
 	strong := false
-	for _, original := range input.Signals {
+	signals := append([]model.Signal(nil), input.Signals...)
+	if geo.Available && geo.Found && strings.EqualFold(geo.NetworkType, "hosting") {
+		signals = append(signals, model.Signal{Code: "HOSTING_NETWORK", Strength: model.SignalSupporting, Evidence: map[string]any{"network_type": geo.NetworkType}})
+	}
+	for _, original := range signals {
 		signal := original
 		if !seen[signal.Code] {
 			signal.Weight = e.rules.Weights[signal.Code]
@@ -133,16 +152,10 @@ func behaviorGroup(code string) string {
 	switch code {
 	case "HIGH_REQUEST_RATE", "HIGH_BURST_RATE", "SUSTAINED_HIGH_RATE":
 		return "rate"
-	case "HIGH_404_RATE":
-		return "404"
-	case "HIGH_5XX_CONTRIBUTION":
-		return "server_errors"
 	case "METHOD_404_SCAN":
 		return "methods"
 	case "CROSS_SITE_SCAN":
 		return "cross_site"
-	case "HIGH_TRAFFIC_SHARE", "CPU_SPIKE_CONTRIBUTOR", "PHP_FPM_SATURATION_CONTRIBUTOR", "HIGH_REQUEST_COST":
-		return "impact"
 	default:
 		return fmt.Sprintf("other:%s", code)
 	}

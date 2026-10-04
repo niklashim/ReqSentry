@@ -37,41 +37,43 @@ type Saturation struct {
 }
 
 type Snapshot struct {
-	RequestSamples       []model.RequestSample
-	SiteID               string
-	ClientIP             netip.Addr
-	Window               time.Duration
-	At                   time.Time
-	Requests             uint64
-	PeakRPS              uint64
-	ActiveSeconds        int
-	StatusFamilies       [6]uint64
-	ImportantStatuses    map[int]uint64
-	Methods              map[string]uint64
-	Method404            map[string]uint64
-	Method404UniquePaths map[string]int
-	MissingUserAgent     uint64
-	UserAgentSamples     []string
-	UserAgentCounts      map[string]uint64
-	PrimaryUserAgent     string
-	UserAgentSwitches    uint64
-	BytesTotal           uint64
-	BytesSamples         uint64
-	RequestTimeNanos     uint64
-	RequestTimeSamples   uint64
-	UpstreamTimeNanos    uint64
-	UpstreamTimeSamples  uint64
-	RedirectKnown        uint64
-	RedirectFollows      uint64
-	UniquePaths          int
-	Unique404Paths       int
-	UserAgents           int
-	QueryPatterns        int
-	UniqueQueryValues    int
-	PathSamples          []string
-	MissingPathSamples   []string
-	QueryPatternSamples  []string
-	Saturation           Saturation
+	RequestSamples         []model.RequestSample
+	SiteID                 string
+	ClientIP               netip.Addr
+	Window                 time.Duration
+	At                     time.Time
+	Requests               uint64
+	PeakRPS                uint64
+	ActiveSeconds          int
+	WordPressRequests      uint64
+	WordPressActiveSeconds int
+	StatusFamilies         [6]uint64
+	ImportantStatuses      map[int]uint64
+	Methods                map[string]uint64
+	Method404              map[string]uint64
+	Method404UniquePaths   map[string]int
+	MissingUserAgent       uint64
+	UserAgentSamples       []string
+	UserAgentCounts        map[string]uint64
+	PrimaryUserAgent       string
+	UserAgentSwitches      uint64
+	BytesTotal             uint64
+	BytesSamples           uint64
+	RequestTimeNanos       uint64
+	RequestTimeSamples     uint64
+	UpstreamTimeNanos      uint64
+	UpstreamTimeSamples    uint64
+	RedirectKnown          uint64
+	RedirectFollows        uint64
+	UniquePaths            int
+	Unique404Paths         int
+	UserAgents             int
+	QueryPatterns          int
+	UniqueQueryValues      int
+	PathSamples            []string
+	MissingPathSamples     []string
+	QueryPatternSamples    []string
+	Saturation             Saturation
 }
 
 type Metrics struct {
@@ -155,30 +157,31 @@ type methodPathKey struct {
 }
 
 type bucket struct {
-	second          int64
-	used            bool
-	requests        uint64
-	statusFamilies  [6]uint64
-	statuses        map[int]uint64
-	methods         map[string]uint64
-	method404       map[string]uint64
-	missingUA       uint64
-	uaCounts        map[string]uint64
-	uaSwitches      uint64
-	bytesTotal      uint64
-	bytesSamples    uint64
-	requestNanos    uint64
-	requestSamples  uint64
-	upstreamNanos   uint64
-	upstreamSamples uint64
-	redirectKnown   uint64
-	redirectFollows uint64
-	paths           map[string]struct{}
-	missing         map[string]struct{}
-	agents          map[string]struct{}
-	queries         map[string]struct{}
-	queryIDs        map[uint64]struct{}
-	saturation      Saturation
+	second            int64
+	used              bool
+	requests          uint64
+	wordpressRequests uint64
+	statusFamilies    [6]uint64
+	statuses          map[int]uint64
+	methods           map[string]uint64
+	method404         map[string]uint64
+	missingUA         uint64
+	uaCounts          map[string]uint64
+	uaSwitches        uint64
+	bytesTotal        uint64
+	bytesSamples      uint64
+	requestNanos      uint64
+	requestSamples    uint64
+	upstreamNanos     uint64
+	upstreamSamples   uint64
+	redirectKnown     uint64
+	redirectFollows   uint64
+	paths             map[string]struct{}
+	missing           map[string]struct{}
+	agents            map[string]struct{}
+	queries           map[string]struct{}
+	queryIDs          map[uint64]struct{}
+	saturation        Saturation
 }
 
 func New(limits config.AggregationConfig, sampleWindow ...time.Duration) *Aggregator {
@@ -347,6 +350,10 @@ func (a *Aggregator) Snapshot(site string, ip netip.Addr, window time.Duration, 
 			continue
 		}
 		result.Requests += b.requests
+		result.WordPressRequests += b.wordpressRequests
+		if b.wordpressRequests > 0 {
+			result.WordPressActiveSeconds++
+		}
 		if b.requests > result.PeakRPS {
 			result.PeakRPS = b.requests
 		}
@@ -572,6 +579,15 @@ func (r *record) add(event model.RequestEvent, second int64, limits config.Aggre
 		*b = bucket{second: second, used: true, statuses: make(map[int]uint64), methods: make(map[string]uint64), method404: make(map[string]uint64), uaCounts: make(map[string]uint64)}
 	}
 	b.requests++
+	if len(event.Path) <= limits.MaxValueBytes {
+		query := ""
+		if len(event.Query) <= limits.MaxValueBytes {
+			query = event.Query
+		}
+		if wordPressEndpoint(event.Path, query) {
+			b.wordpressRequests++
+		}
+	}
 	if degraded {
 		b.saturation.Degraded = true
 	}
