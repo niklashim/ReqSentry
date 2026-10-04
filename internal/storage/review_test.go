@@ -8,6 +8,7 @@ import (
 	"net/netip"
 	"path/filepath"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	"github.com/niklashim/ReqSentry/internal/model"
@@ -165,52 +166,45 @@ func TestRetryBufferIsBoundedAndOverflowRemainsSticky(t *testing.T) {
 }
 
 func TestCheckpointDeadlineAndFullQueueBarrierDoNotBlockIngestion(t *testing.T) {
-	s, err := Open(filepath.Join(t.TempDir(), "deadline.db"), io.Discard)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer s.Close()
-	if err := s.beginDurable(context.Background()); err != nil {
-		t.Fatal(err)
-	}
-	held := true
-	defer func() {
-		if held {
-			s.endDurable()
+	synctest.Test(t, func(t *testing.T) {
+		// Exercise the real checkpoint/queue methods without a database worker:
+		// the full queue cannot lose a slot between setup and the assertion.
+		// Database commits and retries are covered by the integration tests above.
+		s := &Store{queue: make(chan writeRequest, 256), durableGate: make(chan struct{}, 1)}
+		if err := s.beginDurable(context.Background()); err != nil {
+			t.Fatal(err)
 		}
-	}()
-	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
-	err = s.SaveOffsets(ctx, map[string]Offset{"access": {Bytes: 123}})
-	cancel()
-	if !errors.Is(err, context.DeadlineExceeded) {
-		t.Fatalf("checkpoint ignored deadline: %v", err)
-	}
-	// Pause durable commits and fill the bounded queue. An awaiting Flush must not
-	// own the ingestion mutex while it waits for a queue slot.
-	event := model.Incident{Timestamp: time.Now(), ClientIP: netip.MustParseAddr("192.0.2.1")}
-	for range 1024 {
-		if err := s.WriteIncident(context.Background(), event); errors.Is(err, ErrQueueFull) {
-			break
+		ctx, cancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
+		err := s.SaveOffsets(ctx, map[string]Offset{"access": {Bytes: 123}})
+		cancel()
+		s.endDurable()
+		if !errors.Is(err, context.DeadlineExceeded) {
+			t.Fatalf("checkpoint ignored deadline: %v", err)
 		}
-	}
-	flushCtx, stop := context.WithTimeout(context.Background(), 100*time.Millisecond)
-	defer stop()
-	done := make(chan error, 1)
-	go func() { done <- s.Flush(flushCtx) }()
-	time.Sleep(10 * time.Millisecond)
-	wrote := make(chan error, 1)
-	go func() { wrote <- s.WriteIncident(context.Background(), event) }()
-	select {
-	case err := <-wrote:
-		if !errors.Is(err, ErrQueueFull) {
+		event := model.Incident{Timestamp: time.Now(), ClientIP: netip.MustParseAddr("192.0.2.1")}
+		for range cap(s.queue) {
+			if err := s.WriteIncident(context.Background(), event); err != nil {
+				t.Fatalf("queue fill failed: %v", err)
+			}
+		}
+		flushCtx, stop := context.WithTimeout(context.Background(), 100*time.Millisecond)
+		defer stop()
+		done := make(chan error, 1)
+		go func() { done <- s.Flush(flushCtx) }()
+		// Wait until Flush is blocked sending its barrier, without guessing how
+		// long the scheduler or race instrumentation takes to reach that point.
+		synctest.Wait()
+		if !s.mu.TryLock() {
+			t.Fatal("barrier owns the ingestion mutex while waiting for a queue slot")
+		}
+		s.mu.Unlock()
+		if err := s.WriteIncident(context.Background(), event); !errors.Is(err, ErrQueueFull) {
 			t.Fatalf("unexpected full queue result: %v", err)
 		}
-	case <-time.After(50 * time.Millisecond):
-		t.Fatal("barrier blocked ingestion")
-	}
-	if err := <-done; !errors.Is(err, context.DeadlineExceeded) {
-		t.Fatalf("flush ignored deadline: %v", err)
-	}
-	s.endDurable()
-	held = false
+		time.Sleep(100 * time.Millisecond) // Advances the synthetic clock only.
+		synctest.Wait()
+		if err := <-done; !errors.Is(err, context.DeadlineExceeded) {
+			t.Fatalf("flush ignored deadline: %v", err)
+		}
+	})
 }

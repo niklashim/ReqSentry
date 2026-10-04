@@ -11,11 +11,10 @@
   <a href="#try-the-demo">Try the demo</a> ·
   <a href="configs/example.yaml">Configuration</a> ·
   <a href="docs/install.md">Linux installation</a> ·
-  <a href="docs/review.md">Review notes</a> ·
   <a href="LICENSE">MIT license</a>
 </p>
 
-ReqSentry follows web-server logs in real time, groups requests by client and site, and turns suspicious behavior into scored incidents. The **monitoring engine and CLI are the core product**: follow logs, identify suspicious IP behavior, explain each score, and report findings locally or through notifications. The dashboard is optional and disabled by default.
+ReqSentry follows web-server logs in real time, groups requests by client and site, and turns suspicious behavior into scored incidents. Use the monitoring engine and CLI to identify suspicious IPs, inspect the evidence behind each score, and report findings locally or through notifications. The dashboard is optional and disabled by default.
 
 **V1 is monitor-only.** `WOULD_BLOCK` means the evidence meets the configured review threshold. ReqSentry does not block requests, change firewall or web-server rules, or call an enforcement provider.
 
@@ -43,7 +42,7 @@ reqsentry -config /etc/reqsentry/config.yaml -json report
 
 Flags go **before** the command. Run reports as the service account or another account with access to the data. `status` shows source availability, parsed/malformed counts, lag, and notification delivery health. `report` shows the latest retained incident windows; `-details` adds signal weights and up to five saved requests. `-json` keeps structured output available for automation.
 
-Example terminal output from **real replay of synthetic logs**, showing a fictional client's 600 non-GET 404 requests:
+Example analysis of synthetic traffic:
 
 ```text
 Historical log analysis — MONITOR ONLY
@@ -77,7 +76,7 @@ UI toggles preserve config comments, ownership, permissions, and existing access
 
 Send incident summaries to **Slack**, **Microsoft Teams Workflows**, or **AWS SNS**. Each destination has independent filters, cooldowns, bounded queues, and retries. Local monitoring does not wait for provider delivery.
 
-The incident message includes the server, site, client IP, analysis window, request count, peak rate, up to four evidence codes, score/decision, and a monitor-only notice. Full evidence stays in the CLI report and saved incident. A real Slack screenshot can be added after delivery is configured and verified.
+The incident message includes the server, site, client IP, analysis window, request count, peak rate, up to four evidence codes, score/decision, and a monitor-only notice. Full evidence stays in the CLI report and saved incident.
 
 Preview this message without a Slack account:
 
@@ -85,17 +84,17 @@ Preview this message without a Slack account:
 reqsentry -config /etc/reqsentry/config.yaml notifications preview
 ```
 
-To configure Slack later, uncomment `output.slack` in [the config example](configs/example.yaml), reference the environment variable or systemd credential holding the webhook, and send a test explicitly:
+For Slack, uncomment `output.slack` in [the config example](configs/example.yaml), reference the environment variable or systemd credential holding the webhook, and send a test explicitly:
 
 ```sh
 reqsentry -config /etc/reqsentry/config.yaml notifications test legacy-slack
 ```
 
-Named destinations use their configured name; omit the name when exactly one destination is enabled. The test reports provider acceptance, so verify receipt separately. Secrets stay outside YAML and Git. See [notifications](docs/notifications.md) for Slack, Teams, and SNS setup and live validation requirements.
+Named destinations use their configured name; omit the name when exactly one destination is enabled. The test reports provider acceptance, so verify receipt separately. Secrets stay outside YAML and Git. See [notifications](docs/notifications.md) for Slack, Teams, and SNS setup.
 
 ## Retention and configuration
 
-`configs/example.yaml` is the single user-facing example; optional settings are commented out so you can see what exists and enable only what you need. The Docker development setup uses its own [fixture config](docker/webserver/reqsentry.yaml). ReqSentry loads one file selected by `-config`; these files are not combined.
+The [configuration reference](configs/example.yaml) lists every supported setting. Uncomment optional settings to enable the features you need. ReqSentry loads the file selected by `-config`.
 
 Investigation history and ReqSentry's configured output files default to a **four-day** ceiling. Increase or decrease it in config:
 
@@ -164,7 +163,7 @@ Default decision thresholds are configurable:
 
 \* `WOULD_BLOCK` also requires a strong signal or signals from at least two behavioral groups. A high score without that corroboration remains `SUSPICIOUS`. Scores summarize configured detection evidence; they are not probabilities. A network or country is not deemed malicious because one client generated an incident.
 
-In the demo, `203.0.113.31` has fictional Germany/hosting metadata and repeatedly enumerates numeric paths with non-GET 404s. Its saved site incident reaches `WOULD_BLOCK` using the default rules. Normal browser clients are present alongside less severe incidents; decisions are calculated, not inserted into the database.
+In the demo, `203.0.113.31` has fictional Germany/hosting metadata and repeatedly enumerates numeric paths with non-GET 404s. Its saved site incident reaches `WOULD_BLOCK` using the default rules. Normal browser clients are present alongside less severe incidents.
 
 ## Optional dashboard
 
@@ -174,7 +173,7 @@ In the demo, `203.0.113.31` has fictional Germany/hosting metadata and repeatedl
 
 The embedded dashboard is an optional, read-only investigation view. Enable it when useful; the engine, CLI reports, and notifications work with it disabled. Follow live traffic into a site, investigate a client, inspect its score and error context, then search the incident's saved requests.
 
-**All media uses synthetic data:** 60 fictional IPv4/IPv6 clients across four reserved example sites. Country/ASN labels come from a generated demonstration MMDB, and PHP-FPM counters come from a local fixture endpoint. Scores, request samples, correlation, storage, search, and dashboard updates run through the real application. No production logs or credentials are included, and no traffic is sent to these client IPs. A country label is context, not a scoring rule or a claim about a real IP owner.
+The screenshots and animation use synthetic traffic, fictional country/ASN labels, and simulated PHP-FPM counters.
 
 <table>
   <tr>
@@ -195,14 +194,14 @@ With **Go 1.26+** and **Python 3.9+**, from the repository root:
 python3 scripts/demo.py
 ```
 
-Open **[localhost:18092](http://localhost:18092)**. Allow 30 seconds for the first scored windows and about two minutes for traffic trends. The demo runs for five minutes; Ctrl+C stops it. It builds the daemon, creates fresh synthetic log files, and starts a local PHP-FPM status fixture. Everything generated stays in Git-ignored `dev-data/demo/`.
+Open **[localhost:18092](http://localhost:18092)**. Allow 30 seconds for the first scored windows and about two minutes for traffic trends. The demo runs for five minutes; Ctrl+C stops it. It builds the daemon, creates fresh synthetic log files, and starts a local PHP-FPM status fixture. Demo files are stored under `dev-data/demo/`.
 
 ```sh
-# Longer review session or an alternative port:
+# Longer run or an alternative port:
 python3 scripts/demo.py --duration 900 --port 18095
 ```
 
-Use Linux for live CPU/load/memory metrics. Other hosts can exercise the log pipeline and dashboard while unsupported host measurements remain unavailable. See [demo setup and verification](docs/demo.md) for traffic patterns, isolation, and capture details.
+Use Linux for live CPU/load/memory metrics. Other hosts can exercise the log pipeline and dashboard while unsupported host measurements remain unavailable. See the [demo guide](docs/demo.md) for options and traffic patterns.
 
 ### Exercise real Nginx with Docker
 
@@ -214,21 +213,26 @@ docker exec reqsentry-k6 k6 run /scripts/scenarios/normal.js
 docker exec reqsentry-k6 k6 run /scripts/scenarios/cross-site.js
 ```
 
-Open the **[dashboard](http://localhost:8090)** and the example sites: [shop.example](http://localhost:8081), [api.example](http://localhost:8082), [docs.example](http://localhost:8083), and [blog.example](http://localhost:8084). These are local labels; no DNS setup is needed. Ports bind to host loopback, and generated logs/state persist under Git-ignored `dev-data/`.
+Open the **[dashboard](http://localhost:8090)** and the example sites: [shop.example](http://localhost:8081), [api.example](http://localhost:8082), [docs.example](http://localhost:8083), and [blog.example](http://localhost:8084). These are local labels; no DNS setup is needed. Ports bind to host loopback, and generated logs/state persist under `dev-data/`.
 
 The standard Compose fixture uses the actual k6 source IP. The synthetic walkthrough demo deliberately supplies many fictional identities. See [development operations](docs/development.md) and [all k6 scenarios](tests/k6/README.md).
 
-## Verification and scope
+## Development
 
-The fresh race-checked Go suite and static checks pass. Tests cover parser equivalence, proxy trust, bounded aggregation, scoring, error correlation, search isolation, four-day retention, rotation, restart/crash recovery, dashboard access controls, and notification contracts. The README walkthrough is captured from the running Linux demo; [review notes](docs/review.md) record its checks.
+Run the Go checks from the repository root:
 
-**Ready for a monitor-only product review; production validation remains open.** Representative production-log false-positive review and sustained resource measurements on the intended Linux host are still required. Slack/Teams/SNS provider contracts are tested with fake transports; a real workflow/topic/subscriber must be smoke-tested for the intended account. See [validation status](docs/validation.md).
+```sh
+go test -race ./...
+go vet ./...
+```
+
+CI includes Go and dashboard regressions, configuration checks, dependency audits, and container vulnerability scans. See [development](docs/development.md) and [testing](docs/validation.md) for the full workflow.
 
 ## Documentation
 
 | Topic | Guide |
 | --- | --- |
-| Demo walkthrough and review evidence | [Demo](docs/demo.md) · [Review notes](docs/review.md) |
+| Demo and example traffic | [Demo](docs/demo.md) |
 | Engine, CLI reports, and maintenance commands | [CLI guide](docs/cli.md) · [Linux install](docs/install.md) |
 | Every supported configuration setting | [Configuration reference](configs/example.yaml) |
 | Dashboard access, API, and data semantics | [Dashboard](docs/dashboard.md) |
@@ -237,10 +241,7 @@ The fresh race-checked Go suite and static checks pass. Tests cover parser equiv
 | Slack, Teams Workflows, and AWS SNS | [Notifications](docs/notifications.md) |
 | Request samples and local retention | [Incident logs](docs/incident-logs.md) · [Storage](docs/storage-output.md) |
 | Optional enrichment and pool health | [MaxMind](docs/maxmind.md) · [PHP-FPM](docs/php-fpm.md) |
-| Development, components, and implementation work | [Development](docs/development.md) · [Architecture](docs/architecture.md) · [Validation](docs/validation.md) |
-| Test evidence and production review requirements | [Validation](docs/validation.md) |
-
-For code changes, run `go test -race ./...` and `go vet ./...`. Keep production logs, credentials, licensed databases, private configuration, and generated review artifacts outside Git. Published screenshots in `docs/images/` intentionally contain only synthetic demo data.
+| Development, architecture, and testing | [Development](docs/development.md) · [Architecture](docs/architecture.md) · [Testing](docs/validation.md) |
 
 ## License
 

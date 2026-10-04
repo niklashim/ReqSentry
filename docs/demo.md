@@ -1,6 +1,6 @@
-# Reproducible product demo
+# Demo
 
-The [README walkthrough](../README.md#see-it-in-action) shows the actual ReqSentry dashboard backed by its live parser, aggregator, default detection rules, scoring, correlation, and SQLite history. The fixture generates logs locally; it does not make HTTP requests to any displayed client address or site.
+Run a local demo with synthetic traffic to explore incident scoring, error correlation, and the optional dashboard shown in the [README](../README.md#optional-dashboard). The fixture generates logs locally; it does not make HTTP requests to any displayed client address or site.
 
 ## Start
 
@@ -37,7 +37,7 @@ Every site also has a canonical JSON error source. Synthetic upstream failures s
 
 Country, ISP, private ASN values, and network classifications are invented. The script writes a small MMDB following the [MaxMind DB format specification](https://maxmind.github.io/MaxMind-DB/); the real local enrichment reader validates and reads it. This fixture is not a MaxMind geolocation dataset and makes no claim about real allocations. The PHP-FPM collector polls a real local HTTP endpoint returning simulated pool counters; it is not a PHP workload measurement. Linux CPU, memory, and load readings come from the running Linux system/container; unsupported host readings are unavailable.
 
-## Review route
+## Explore the dashboard
 
 1. **Overview:** watch live rates, status mix, active clients, and incident counts. Read the chart coverage labels.
 2. **Sites:** open a site and compare its traffic, sampled networks, and error context.
@@ -47,11 +47,3 @@ Country, ISP, private ASN values, and network classifications are invented. The 
 6. **HTTP analytics, Server health, PHP-FPM, Networks:** inspect the remaining views and their unavailable/sample-coverage labels.
 
 These are read-only actions. Changing filters does not change a score or block a client.
-
-## Linux capture environment
-
-The README media was recorded using a separate Linux container, loopback-published port 18092, and a dedicated Docker volume for live SQLite state. The existing local development stack was left running. The same script can run natively on Linux; Docker is not required for the quick demo.
-
-When running SQLite in a Linux container, inspect it through the container's CLI or dashboard API. Do not open its live WAL database simultaneously from a different operating system through a shared mount. Copy/export a stopped database if a host-side inspection is needed.
-
-Screenshots and the GIF contain only the generated fixture. Runtime configs, MMDBs, logs, raw capture frames, reports, and database files are private/generated material and remain outside the publishable source set. Only the reviewed media under `docs/images/` is intended for the README. See [review checks](review.md) and [production validation](validation.md) for the limits of this demonstration.

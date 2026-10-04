@@ -36,7 +36,7 @@ CustomLog /var/log/apache/site2.access.log reqsentry
 
 `%{Location}o` supplies the response header for redirect-follow evidence. Only same-host absolute URLs or root-relative locations with a valid path are assessed; otherwise follow behavior remains unavailable.
 
-## Current parser limits
+## Parser limits
 
 - The parser accepts one access-log event per line, with a maximum line size of 1 MiB in the live watcher.
 - On first startup, an existing file is followed from its current end, avoiding a full historical reread. A file that was missing at startup is read from its beginning when it appears. With SQLite available, clean restarts resume from the saved file identity and complete-line offset, including lines written while stopped. See [restart positions and crash behavior](storage-output.md).

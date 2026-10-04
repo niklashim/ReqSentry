@@ -40,6 +40,6 @@ The parser's configured site ID is authoritative; a request's `Host` header is s
 3. For dashboard changes, exercise the local Compose fixture and [k6 scenarios](../tests/k6/README.md), then check API coverage labels, denied routes, saved incidents, and resource use.
 4. Keep the root [README](../README.md) short and update the appropriate operations guide when behavior or limits change.
 
-The [original project brief](project-brief.md) explains the design goals. [Validation](validation.md) records delivery evidence and open production requirements.
+The [original project brief](project-brief.md) explains the design goals. [Testing](validation.md) covers regression checks and deployment validation.
 
 Structured source selection is shared by live monitoring, preview, replay, and optional crash recovery. Error events remain distinct from requests; `internal/correlation` stores independent bounded request/error rings and produces immutable incident context. Notification workers own routing/retries and never perform provider work in the request hot path. [Structured logs](structured-logs.md), [error correlation](error-correlation.md), [notifications](notifications.md), and [storage/recovery](storage-output.md) define their contracts and limits.

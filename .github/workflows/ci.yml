@@ -36,6 +36,13 @@ jobs:
           go build -trimpath -o /tmp/reqsentry ./cmd/reqsentry
           /tmp/reqsentry -config configs/example.yaml config test
           /tmp/reqsentry -config docker/webserver/reqsentry.yaml config test
+      - name: Constrained-scheduler storage and watcher regressions
+        env:
+          GOMAXPROCS: '1'
+        run: >-
+          go test -race ./internal/storage ./internal/watcher
+          -run '^(TestCheckpointDeadlineAndFullQueueBarrierDoNotBlockIngestion|TestErrorFloodDoesNotDisplaceAccessAndSurvivesRotation)$'
+          -count=3 -timeout=3m
       - name: Dashboard regressions and dependency audit
         working-directory: tests/dashboard
         run: |
